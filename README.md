@@ -1,442 +1,185 @@
-# Multi-Level Bidirectional Decoder Interaction for Uncertainty-Aware Breast Ultrasound Analysis
-
-<div align="center">
+# Adaptive Bidirectional Task Interaction for Joint Segmentation and Classification of Breast Ultrasound
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![TensorFlow 2.13](https://img.shields.io/badge/TensorFlow-2.13-orange.svg)](https://tensorflow.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Official Implementation**
+Official implementation.
 
-</div>
-
----
-
-## Abstract
-
-Breast ultrasound interpretation requires simultaneous lesion segmentation and tissue classification, yet conventional multi-task learning approaches suffer from task interference and rigid coordination strategies. We propose a framework that addresses these limitations through multi-level decoder interaction and uncertainty-aware adaptive coordination. Task Interaction Modules operate at four decoder resolutions, establishing bidirectional communication during spatial reconstruction. Uncertainty Proxy Attention uses feature activation variance for efficient per-instance adaptive weighting. Evaluation on BUSI and BUSI-WHU datasets demonstrates 74.50% IoU and 90.60% accuracy, outperforming encoder-sharing methods by 1.6–5.6% IoU.
-
----
-
-## Architecture Overview
-
-<div align="center">
-  <img src="https://github.com/C-loud-Nine/Uncertainty-Aware-Multi-Level-Decoder-Interaction/blob/main/arch.png" alt="Architecture Overview" width="95%">
-  <br>
-  <em><strong>Figure 1:</strong> Overall architecture with multi-level decoder interaction. TIM enables bidirectional feature exchange at four decoder levels (D₁–D₄). UPA adaptively modulates information flow at each level based on feature activation variance. Multi-scale fusion modules augment encoder features to handle lesion size variation (5–40mm).</em>
-</div>
+> **Note on naming.** This repository was previously released as
+> *Uncertainty-Aware Multi-Level Decoder Interaction*. The adaptive weighting
+> module computes activation-dispersion statistics, which are descriptive
+> statistics of the activations rather than estimates of predictive
+> uncertainty, so the module has been renamed and the uncertainty framing
+> removed. The computation is unchanged.
+>
+> | Previous name | Current name |
+> |---|---|
+> | Uncertainty Proxy Attention (UPA) | Adaptive Interaction Weighting (AIW) |
+> | Hierarchical Multi-Scale Fusion (HMSF) | Multi-Scale Context Fusion (MSCF) |
+> | Task Interaction Module (TIM) | unchanged |
 
 ---
 
-## Key Contributions
+## Overview
 
-### 1️⃣ Multi-Level Decoder Interaction
+Joint lesion segmentation and tissue classification are usually trained with a
+shared encoder, so the two branches stop exchanging information once their
+decoders separate. This work restores that exchange during decoding and makes
+its strength an explicit, learned quantity.
 
-**Problem:** Conventional encoder-sharing MTL restricts task communication to abstract feature extraction. Once tasks enter separate decoders, representations diverge, preventing exploitation of complementary information during spatial reconstruction.
-
-**Solution:** Task Interaction Modules (TIM) at **four decoder levels** enable progressive bidirectional refinement:
-
-<div align="center">
-
-| Decoder Level | Resolution | Channel Dim | Interaction Focus |
-|:-------------:|:----------:|:-----------:|:------------------|
-| **D₁** | 14×14 | 384 | Coarse semantic context |
-| **D₂** | 28×28 | 192 | Mid-level feature fusion |
-| **D₃** | 56×56 | 96 | Fine-grained spatial detail |
-| **D₄** | 112×112 | 48 | Boundary-level precision |
-
-</div>
-
-**Bidirectional pathways:**
-- **Segmentation → Classification:** Attention-weighted pooling extracts boundary-aware spatial context, gated addition prevents error propagation
-- **Classification → Segmentation:** Semantic priors broadcast spatially, multiplicative modulation (μ = 1 + τ·gate·context) enables selective enhancement
-
-**Algorithm 1: Task Interaction Module**
-```
-Input: Decoder features D_ℓ ∈ ℝ^(B×H×W×C), Classification features f_clf^ℓ ∈ ℝ^(B×256)
-Output: Enhanced features (D_ℓ^enh, f_clf^ℓ,enh)
-
-// Segmentation → Classification
-1: f_seg^ctx ← Dense₂₅₆(GAP(Conv₁ₓ₁(D_ℓ)))
-2: g_clf ← σ(MLP(f_seg^ctx))
-3: f_clf^ℓ,enh ← f_clf^ℓ + g_clf ⊙ f_seg^ctx
-
-// Classification → Segmentation
-4: f_clf^spat ← Reshape(Dense_C(f_clf^ℓ), [1,1,C])
-5: g_seg ← σ(MLP(GAP(D_ℓ)))
-6: μ_ℓ ← 1 + 0.7 · g_seg ⊙ f_clf^spat
-7: D_ℓ^enh ← D_ℓ ⊙ μ_ℓ
-
-Return (D_ℓ^enh, f_clf^ℓ,enh)
-```
+- **TIM** exchanges information between the segmentation decoder and the
+  classification branch at each of four decoder levels.
+- **AIW** blends pre-interaction and post-interaction features with a
+  coefficient computed per image and per level.
+- **MSCF** applies three dilated separable convolutions with softmax scale
+  competition inside every encoder stage and decoder block.
 
 ---
 
-### 2️⃣ Uncertainty Proxy Attention
-
-**Problem:** Instance heterogeneity—cases with clear boundaries benefit from strong task interaction, while ambiguous cases (posterior shadowing, heterogeneous textures) require conservative weighting.
-
-**Solution:** Adaptive coordination via feature activation variance as an efficient uncertainty proxy:
-
-**Algorithm 2: Uncertainty Proxy Attention**
-```
-Input: Base features (D_ℓ, f_clf^ℓ), Enhanced features (D_ℓ^enh, f_clf^ℓ,enh)
-Output: Final features (D_ℓ^final, f_clf^ℓ,final)
-
-// Estimate uncertainties
-1: u_seg ← 𝔼_c[Var_{h,w}(D_ℓ,c^enh)]           // Spatial variance per channel
-2: u_clf ← Var(f_clf^ℓ,enh)                    // Feature vector variance
-3: ũ_seg ← u_seg / (mean(u_seg) + ε)           // Normalize to comparable scales
-4: ũ_clf ← u_clf / (mean(u_clf) + ε)
-
-// MLP-based adaptive weighting
-5: [ω_seg, ω_clf] ← Softmax(MLP₂(ReLU(MLP₃₂([ũ_seg, ũ_clf]))))
-
-// Residual interpolation
-6: D_ℓ^final ← D_ℓ + ω_seg · (D_ℓ^enh - D_ℓ)
-7: f_clf^ℓ,final ← f_clf^ℓ + ω_clf · (f_clf^ℓ,enh - f_clf^ℓ)
-
-Return (D_ℓ^final, f_clf^ℓ,final)
-```
-
-**Key properties:**
-- ω = 0: Preserve base features (reject uncertain enhancement)
-- ω = 1: Fully adopt enhanced features (trust task interaction)
-- Softmax creates task competition: higher uncertainty in one task increases reliance on the other
-
----
-
-### 3️⃣ Multi-Scale Context Fusion
-
-Breast ultrasound lesions exhibit substantial size variation (5–40mm diameter). Multi-scale context fusion employs parallel dilated separable convolutions with instance-adaptive scale weighting:
-
-**Algorithm 3: Multi-Scale Context Fusion**
-```
-Input: Feature map X ∈ ℝ^(B×H×W×C)
-Output: Fused features Y ∈ ℝ^(B×H×W×C)
-
-// Multi-scale feature extraction
-1: F₁ ← SepConv₃ₓ₃^(r=1)(X)    // 3×3 effective receptive field
-2: F₂ ← SepConv₃ₓ₃^(r=2)(X)    // 5×5 effective receptive field
-3: F₄ ← SepConv₃ₓ₃^(r=4)(X)    // 9×9 effective receptive field
-
-// SE-inspired scale attention
-4: α ← Softmax(MLP₃(ReLU(MLP_{C/8}(GAP(X)))))
-
-// Weighted fusion with residual
-5: Y ← Conv₁ₓ₁(∑ᵢ αᵢ · Fᵢ) + X
-
-Return Y
-```
-
-Unlike standard ASPP, separable convolutions reduce parameters while softmax normalization enforces scale competition, enabling emphasis on appropriate receptive fields per lesion.
-
----
-
-## Learned Behavior Analysis
-
-<div align="center">
-  <img src="https://github.com/C-loud-Nine/Uncertainty-Aware-Multi-Level-Decoder-Interaction/blob/main/tim_upa.png" alt="TIM and UPA Analysis" width="90%">
-  <br>
-  <em><strong>Figure 2:</strong> (Left) Task interaction magnitudes across decoder levels reveal consistent segmentation-to-classification dominance, peaking at D₃. Dense spatial features inject richer context into compact classification vectors. (Right) UPA weight distributions show adaptive task balancing: early stages (D₁, D₂) trust TIM-enhanced features where global semantic context is reliable; deeper levels (D₃, D₄) favor base features, preserving fine-grained spatial detail during boundary reconstruction.</em>
-</div>
-
-**Key observations:**
-- **Segmentation dominance:** Spatially dense tensors (H×W×C) provide richer priors to compact vectors (256-D) than the reverse
-- **D₃ peak:** Intermediate-scale features (28×28) achieve optimal semantic-spatial balance
-- **UPA adaptation:** Classification features receive higher weight at D₁/D₂ (semantic context), segmentation dominates at D₃/D₄ (boundary detail)
-
----
-
-## Datasets
-
-### BUSI (Breast Ultrasound Images Dataset)
-
-<div align="center">
-
-| Category | Images | Patients | Characteristics |
-|:---------|:------:|:--------:|:----------------|
-| **Normal** | 133 | - | No lesions, null segmentation masks |
-| **Benign** | 437 | - | Fibroadenomas, cysts, avg. size 5–20mm |
-| **Malignant** | 210 | - | Invasive carcinomas, avg. size 10–40mm |
-| **Total** | **780** | **600** | Variable resolution, annotated by experts |
-
-</div>
-
-**Source:** [Mendeley Data](https://data.mendeley.com/datasets/wmy84gzngw/1)  
-**Reference:** Al-Dhabyani et al., "Dataset of breast ultrasound images," *Data in Brief*, 2020  
-**Annotations:** Multiple masks per image merged via pixel-wise maximum  
-**Challenges:** Posterior acoustic shadowing, speckle noise, boundary ambiguity
-
-### BUSI-WHU (Extended Dataset)
-
-<div align="center">
-
-| Category | Images | Characteristics |
-|:---------|:------:|:----------------|
-| **Benign** | 561 | Larger, more diverse phenotypes |
-| **Malignant** | 387 | Heterogeneous textures, irregular margins |
-| **Total** | **927** | Different acquisition protocols |
-
-</div>
-
-**Source:** [Mendeley Data](https://data.mendeley.com/datasets/...)  
-**Reference:** Huang et al., "BUSI-WHU: Breast cancer ultrasound image dataset," *Mendeley Data V3*, 2025  
-**Purpose:** Cross-dataset validation to assess architectural robustness
-
-**Data preprocessing:**
-- Patient-level stratified splitting (60% train / 15% validation / 25% test)
-- Resize to 224×224, normalize to [0,1]
-- Augmentation: horizontal/vertical flip, rotation ±15° (3× expansion per sample)
-
----
-
-## Experimental Results
-
-### Quantitative Performance
-
-<div align="center">
-
-**Table 1: Performance on BUSI Dataset (780 images)**
-
-| Method | Type | Segmentation | | Classification | |
-|:-------|:----:|:------------:|:---:|:-------------:|:---:|
-| | | **IoU (%)** | **Dice (%)** | **Acc (%)** | **F1 (%)** |
-| U-Net† | CNN | 66.80 | 80.05 | 86.50 | 84.70 |
-| Attention U-Net† | CNN | 68.20 | 81.05 | 87.80 | 86.00 |
-| UNet++ | CNN | 69.50 | 81.95 | – | – |
-| TransUNet | Transformer | 70.30 | 82.55 | – | – |
-| Swin-UNet | Transformer | 71.50 | 83.40 | – | – |
-| MISSFormer | Transformer | 72.80 | 84.25 | – | – |
-| MTAN | MTL | 68.90 | 81.60 | 87.20 | 85.40 |
-| MTANet | MTL | 72.10 | 83.80 | 89.30 | 87.60 |
-| MTL-OCA | MTL | 72.90 | 84.30 | 89.90 | 88.20 |
-| **Proposed** | **MTL** | **74.50** | **82.25** | **90.60** | **89.84** |
-
-<em>† Segmentation models extended with classification heads for multi-task evaluation</em>
-
-</div>
-
-<div align="center">
-
-**Table 2: Performance on BUSI-WHU (927 images)**
-
-| Method | IoU (%) | Dice (%) | Acc (%) | F1 (%) |
-|:-------|:-------:|:--------:|:-------:|:------:|
-| MISSFormer | 84.60 | 91.60 | – | – |
-| MTL-OCA | 84.50 | 91.60 | 94.50 | 92.90 |
-| **Proposed** | **86.40** | **92.70** | **95.00** | **94.74** |
-
-</div>
-
-**Key achievements:**
-- **BUSI:** +1.6% IoU over best MTL baseline (MTL-OCA), +1.7% over best transformer (MISSFormer)
-- **BUSI-WHU:** +1.9% IoU, +0.5% accuracy improvement with consistent performance ordering
-- **Generalization:** Relative advantages preserved across different acquisition protocols
-
----
-
-### Ablation Study
-
-<div align="center">
-
-**Table 3: Component Contributions on BUSI Dataset**
-
-| Components | | | Segmentation | | | Classification | | |
-|:----------:|:---:|:---:|:------------:|:-------:|:------:|:--------------:|:-------:|:-------:|
-| **HMSF** | **TIM** | **UPA** | **IoU (%)** | **Dice (%)** | **Sens (%)** | **Acc (%)** | **F1 (%)** | **AUC (%)** |
-| – | – | – | 67.43 | 75.48 | 75.06 | 84.62 | 82.33 | 94.90 |
-| ✓ | – | – | 69.95 | 77.63 | 79.12 | 88.89 | 88.34 | 96.30 |
-| – | ✓ | – | 69.20 | 77.30 | 79.83 | 86.32 | 84.00 | 94.41 |
-| – | ✓ | ✓ | 69.74 | 78.55 | **83.07** | 88.89 | 88.34 | 97.31 |
-| **✓** | **✓** | **✓** | **74.50** | **82.25** | 80.87 | **90.60** | **89.83** | **97.66** |
-
-</div>
-
-**Analysis:**
-- **HMSF** (Multi-scale fusion): +2.52% IoU, addresses lesion size variation and appearance heterogeneity
-- **TIM** (Task interaction): +1.77% IoU, bidirectional communication during spatial reconstruction
-- **UPA** (Uncertainty): 94.41% → 97.31% AUC, adaptive per-instance coordination reduces over-commitment to unreliable signals
-- **Full system**: +7.07% IoU over baseline, demonstrating genuine functional synergy
-
----
-
-### Qualitative Results
-
-<div align="center">
-  <img src="https://github.com/C-loud-Nine/Uncertainty-Aware-Multi-Level-Decoder-Interaction/blob/main/mask.png" alt="Qualitative Segmentation Results" width="95%">
-  <br>
-  <em><strong>Figure 3:</strong> Qualitative segmentation comparison on BUSI dataset. The proposed method demonstrates improved boundary localization in posterior shadowing regions (row 1), better handling of heterogeneous textures (row 2), and accurate delineation of irregular margins (row 3). Encoder-sharing baselines (U-Net, Attention U-Net) struggle with spatial detail recovery, while transformer methods (Swin-UNet) produce over-smoothed boundaries. Our decoder-level interaction preserves fine-grained spatial structure while incorporating semantic constraints.</em>
-</div>
-
----
-
-## Repository Structure
-```
-decoder-task-interaction/
-│
-├── config.py                    # Hyperparameters and training configuration
-│   ├── Model architecture (decoder channels, dropout)
-│   ├── Training setup (learning rate, batch size, epochs)
-│   ├── Data split ratios (60/15/25)
-│   └── Loss weights and callback settings
-│
-├── data_loader.py              # Dataset loading and preprocessing
-│   ├── load_image_and_merge_masks()  # Merge multiple annotations
-│   ├── augment_dataset()              # 3× augmentation per sample
-│   └── prepare_datasets()             # Patient-level stratification
-│
-├── loss.py                     # Multi-task loss formulation
-│   ├── enhanced_lesion_focus_loss()   # Focal Tversky + boundary + texture
-│   ├── efficient_boundary_detection() # Curvature-based boundary loss
-│   ├── efficient_texture_consistency() # Sobel gradient variance
-│   └── enhanced_multi_modal_focal_loss() # Classification focal CE
-│
-├── modules.py                  # Custom neural network layers
-│   ├── TaskInteractionModule          # Bidirectional Seg↔Clf
-│   ├── UncertaintyGuidedAttention     # Variance-based adaptive weighting
-│   ├── HCTMultiScaleFusion           # Dilated separable convolutions
-│   ├── HCTAttentionGate              # Skip connection attention
-│   ├── HCTResidualBlock              # Residual + multi-scale + attention
-│   └── HCTDualPathAttention          # Channel + spatial attention
-│
-├── model.py                    # Model architecture
-│   ├── enhanced_hct_model()           # Main model builder
-│   ├── build_decoder_block()          # Decoder construction
-│   └── build_tim_uga()                # TIM + UPA integration
-│
-├── train.py                    # Training pipeline
-│   ├── CompositeMetric                # 0.7×IoU + 0.3×Acc monitoring
-│   ├── AdaptiveLossWeights            # Dynamic weight adjustment
-│   ├── CosineDecayScheduler           # Learning rate annealing
-│   └── Training loop (warmup + main)
-│
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file
-```
-
----
-
-## Implementation Details
-
-### Loss Formulation
-
-**Multi-task objective:**
-```
-ℒ_total = 0.80 · ℒ_seg + 0.20 · ℒ_clf
-```
-
-**Segmentation loss:**
-```
-ℒ_seg = ℒ_FocalTversky + 0.25 · ℒ_boundary + 0.15 · ℒ_texture
-
-where:
-  ℒ_FocalTversky: α=0.3 (FP penalty), β=0.7 (FN penalty), γ=0.75 (focal)
-  ℒ_boundary: 𝔼[|K_curv ⊗ M - K_curv ⊗ M̂|], K_curv = (x²-y²)e^(-r²/2σ²)
-  ℒ_texture: |Var(S_x ⊗ M) - Var(S_x ⊗ M̂)|, S_x = Sobel horizontal
-```
-
-**Classification loss:**
-```
-ℒ_clf = FocalCrossEntropy(γ=2.0)
-```
-
-### Training Configuration
-
-<div align="center">
-
-| Hyperparameter | Value | Purpose |
-|:---------------|:-----:|:--------|
-| **Batch size** | 8 | Memory-efficient training |
-| **Initial LR** | 3×10⁻⁴ | Stable convergence |
-| **LR schedule** | Cosine annealing | Smooth decay to 1.5×10⁻⁶ |
-| **Optimizer** | Adam (β₁=0.91, β₂=0.999) | Adaptive moments |
-| **Gradient clipping** | 1.0 (global norm) | Prevent instability |
-| **Warmup epochs** | 3 | Feature extractor stabilization |
-| **Total epochs** | 100 | With early stopping (patience 22) |
-| **Data augmentation** | 3× per sample | HFlip, VFlip, Rotate±15° |
-
-</div>
-
-### Model Complexity
-
-<div align="center">
-
-| Component | Parameters | FLOPs | Description |
-|:----------|:----------:|:-----:|:------------|
-| EfficientNet-B4 Encoder | 17.7M | 4.2G | ImageNet pretrained, first 50 layers frozen |
-| Multi-Scale Fusion (×5) | 1.4M | 0.8G | Dilated separable convolutions |
-| Decoder (4 levels) | 3.8M | 2.1G | U-Net with attention gates |
-| TIM (×4 levels) | 2.1M | 0.5G | Bidirectional task interaction |
-| UPA (×4 levels) | 0.2M | 0.1G | Variance-based weighting |
-| **Total** | **~25.2M** | **~7.7G** | Inference: 42ms per image (RTX 3090) |
-
-</div>
-
----
-
-## Dependencies
-
-**Core framework:**
-```
-tensorflow==2.13.0
-numpy==1.24.3
-```
-
-**Computer vision:**
-```
-opencv-python==4.8.0.74
-albumentations==1.3.1
-scikit-image==0.21.0
-```
-
-**Machine learning utilities:**
-```
-scikit-learn==1.3.0
-```
-
-**Visualization:**
-```
-matplotlib==3.7.2
-seaborn==0.12.2
-```
-
-Full dependencies available in `requirements.txt`
+## Results
+
+Trained and evaluated under the protocol in `config.py`. Segmentation is
+foreground IoU and Dice at a threshold of 0.5; classification is accuracy and
+weighted F1.
+
+| Method | BUSI IoU | BUSI Dice | BUSI Acc | BUSI F1 | WHU IoU | WHU Dice | WHU Acc | WHU F1 |
+|---|---|---|---|---|---|---|---|---|
+| U-Net | 66.80 | 80.05 | 86.50 | 84.70 | 77.50 | 87.30 | 90.80 | 89.10 |
+| Attention U-Net | 68.20 | 81.05 | 87.80 | 86.00 | 79.20 | 88.40 | 92.10 | 90.50 |
+| UNet++ | 69.50 | 81.95 | 88.21 | 86.90 | 80.70 | 89.30 | 92.80 | 91.41 |
+| TransUNet | 70.30 | 82.55 | – | – | 81.60 | 89.90 | – | – |
+| Swin-UNet | 71.50 | 83.40 | – | – | 83.00 | 90.70 | – | – |
+| MISSFormer | 72.80 | 84.25 | – | – | 84.60 | 91.60 | – | – |
+| MTAN | 68.90 | 81.60 | 87.20 | 85.40 | 80.00 | 88.90 | 91.60 | 90.00 |
+| MTANet | 72.10 | 83.80 | 89.30 | 87.60 | 83.70 | 91.10 | 93.90 | 92.30 |
+| MTL-OCA | 72.90 | 84.30 | 89.90 | 88.20 | 84.50 | 91.60 | 94.50 | 92.90 |
+| **Proposed** | **74.19** | **85.25** | **90.60** | **89.84** | **86.40** | **92.70** | **95.00** | **94.74** |
+
+### Component ablation (BUSI)
+
+| MSCF | TIM | AIW | IoU | Dice | Sens | Prec_s | Acc | F1 | AUC | Prec_c |
+|:---:|:---:|:---:|---|---|---|---|---|---|---|---|
+| – | – | – | 67.43 | 80.55 | 75.06 | 79.73 | 84.62 | 82.33 | 94.90 | 82.16 |
+| ✓ | – | – | 69.12 | 81.74 | 79.12 | 80.19 | 88.89 | 88.34 | 96.30 | 86.70 |
+| – | ✓ | – | 68.94 | 81.80 | 79.83 | 79.76 | 86.32 | 84.00 | 94.41 | 86.04 |
+| – | ✓ | ✓ | 69.74 | 82.17 | **83.07** | 79.32 | 88.89 | 88.34 | 97.31 | 87.24 |
+| **✓** | **✓** | **✓** | **74.19** | **85.25** | 80.87 | **85.47** | **90.60** | **89.84** | **97.66** | **89.95** |
+
+- MSCF alone: +1.69 IoU. TIM alone: +1.51 IoU.
+- Rows 3 and 4 differ only in AIW and isolate it: AUC 94.41 → 97.31,
+  accuracy 86.32 → 88.89, IoU +0.80.
+- The gains are not additive: MSCF and the TIM–AIW pair give 1.69 and 2.31
+  separately, totalling 4.00, but 6.76 together.
 
 ---
 
 ## Installation
+
 ```bash
-git clone https://github.com/C-loud-Nine/Uncertainty-Aware-Multi-Level-Decoder-Interaction.git
-cd Uncertainty-Aware-Multi-Level-Decoder-Interaction
+git clone https://github.com/C-loud-Nine/Adaptive-Task-Interaction-BUS.git
+cd Adaptive-Task-Interaction-BUS
 pip install -r requirements.txt
 ```
 
+## Data
 
+```
+data/
+├── BUSI/                 # 780 images, 3 classes
+│   ├── normal/           # image.png + image_mask.png (several masks are merged)
+│   ├── benign/
+│   └── malignant/
+└── BUSI-WHU/             # 927 images, 2 classes
+    ├── benign/
+    │   ├── images/
+    │   └── masks/
+    └── malignant/
+```
+
+BUSI: [Al-Dhabyani et al., Data in Brief 2020](https://doi.org/10.1016/j.dib.2019.104863)
+
+BUSI-WHU: [Huang et al., Mendeley Data V3](https://doi.org/10.17632/k6cpmwybk3.3)
+
+## Usage
+
+```bash
+# train on BUSI (set DATASET = 'busi_whu' in config.py for BUSI-WHU)
+python train.py
+
+# reproduce the reported metrics
+python evaluate.py --weights checkpoints/best_model.h5 --dataset busi
+```
+
+`evaluate.py` is the script that produces the numbers in the tables above.
+Note that the `MeanIoU` metric printed during training averages foreground and
+background IoU on unthresholded outputs, so it is not comparable to the
+foreground IoU reported in the paper; use `evaluate.py` for reporting.
 
 ---
+
+## Repository layout
+
+```
+├── config.py         # paths, hyperparameters, dataset selection
+├── data_loader.py    # BUSI and BUSI-WHU loading, splitting, augmentation
+├── modules.py        # MSCF, DualPathAttention, ResidualBlock, AttentionGate, TIM, AIW
+├── model.py          # encoder, 4-level decoder, dual heads
+├── loss.py           # focal Tversky + boundary + texture; focal cross-entropy
+├── train.py          # training loop and callbacks
+└── evaluate.py       # reported metrics
+```
+
+---
+
+## Notes on the implementation
+
+These are stated so that the code and the paper can be read together.
+
+- **The TIM modulation is one-sided.** It is `1 + 0.7 * sigmoid(.) * sigmoid(.)`,
+  so the factor lies in `[1, 1.7]`: a channel is left unchanged or amplified,
+  never attenuated. Reversion toward the original features is achieved by AIW
+  driving its coefficient toward zero, not by the modulation itself.
+- **AIW coefficients are normalised within the batch**, so a sample's
+  coefficient depends on the other samples in its batch.
+- **AIW uses a softmax**, so the two coefficients sum to one: the branches share
+  a single interaction budget at each level.
+- **BUSI partitions are image-level**, because the dataset carries no patient
+  identifiers. BUSI is also known to contain
+  [duplicated images](https://doi.org/10.1016/j.dib.2023.109162), which are not
+  removed here.
+- **The boundary loss term is computed on binarised masks**, as defined in the
+  paper.
+
+## Changes from the previous release
+
+- Module renames (table at the top); computation unchanged.
+- BUSI-WHU loading added. The previous release was BUSI-only, so the BUSI-WHU
+  results could not be reproduced from it.
+- `evaluate.py` added, computing the foreground IoU and Dice reported in the paper.
+- The data split now reads `TRAIN/VAL/TEST_SPLIT` from `config.py`. The previous
+  loader declared 70/15/15 in config but hard-coded 60/15/25, so the constants
+  had no effect.
+- The post-augmentation shuffle is now seeded.
+- Removed an unused `task_context` branch in `DualPathAttention` that no call
+  site invoked.
+- README numbers corrected to match the paper.
+- Architecture and qualitative figures temporarily removed pending relabelling;
+  the previous versions carried the old module names.
+
+## Citation
+
+```bibtex
+@article{shafi2026adaptive,
+  title   = {Adaptive bidirectional task interaction for joint segmentation and
+             classification of breast ultrasound},
+  author  = {Al Shafi, Abdullah and Zunayed, Md Kawsar Mahmud Khan and
+             Ahmmed, Safin and Hossain, Sk Imran and Mephu Nguifo, Engelbert},
+  journal = {arXiv preprint arXiv:2603.01295},
+  year    = {2026}
+}
+```
 
 ## License
 
-This project is licensed under the MIT License. See `LICENSE` file for details.
-
----
-
-## Acknowledgments
-
-**Datasets:**
-- BUSI: Al-Dhabyani et al., "Dataset of breast ultrasound images," *Data in Brief* 28:104863, 2020
-- BUSI-WHU: Huang et al., "BUSI-WHU: Breast cancer ultrasound image dataset," *Mendeley Data V3*, 2025
-
-**Technical foundations:**
-- EfficientNet: Tan & Le, "EfficientNet: Rethinking model scaling for CNNs," *ICML*, 2019
-- Focal Loss: Lin et al., "Focal loss for dense object detection," *ICCV*, 2017
-- Attention U-Net: Oktay et al., "Attention U-Net: Learning where to look for the pancreas," *MIDL*, 2018
-
----
-
-<div align="center">
-
-**Code released for research reproducibility**
-
-</div>
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Created automatically by config.py
+checkpoints/
+results/
+
+# Data (not redistributed; see README for sources)
+data/
+
+# Weights and logs
+*.h5
+*.keras
+*.ckpt
+logs/
+*.log
+
+# OS
+.DS_Store

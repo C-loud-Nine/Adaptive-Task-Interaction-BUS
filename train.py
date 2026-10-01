@@ -8,7 +8,7 @@ import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, Callback
 
 import config
-from model import enhanced_hct_model
+from model import adaptive_task_interaction_model
 from loss import enhanced_lesion_focus_loss, enhanced_multi_modal_focal_loss
 from data_loader import prepare_datasets
 
@@ -151,7 +151,7 @@ def main():
     
     # Build model
     print("\nBuilding model...")
-    model = enhanced_hct_model(
+    model = adaptive_task_interaction_model(
         input_size=config.INPUT_SIZE,
         num_seg_classes=config.NUM_SEG_CLASSES,
         num_clf_classes=config.NUM_CLF_CLASSES,
@@ -174,6 +174,11 @@ def main():
         metrics={
             "segmentation_output": [
                 tf.keras.metrics.MeanIoU(num_classes=2, name="mean_io_u"),
+                # Foreground IoU at the reporting threshold. This is the quantity
+                # reported in the paper; see evaluate.py for the full metric set.
+                tf.keras.metrics.BinaryIoU(target_class_ids=[1],
+                                           threshold=config.SEG_THRESHOLD,
+                                           name="fg_iou"),
                 tf.keras.metrics.BinaryAccuracy(name="bin_acc")
             ],
             "classification_output": [

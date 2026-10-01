@@ -1,4 +1,4 @@
-"""Configuration file for multi-task breast ultrasound model."""
+"""Configuration for the adaptive bidirectional task interaction model."""
 
 import os
 
@@ -6,12 +6,25 @@ import os
 # PATHS
 # ============================================================================
 BUSI_PATH = './data/BUSI'
+WHU_PATH = './data/BUSI-WHU'
 CHECKPOINT_DIR = './checkpoints'
 RESULTS_DIR = './results'
 
-# Create directories if they don't exist
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# ============================================================================
+# DATASET SELECTION
+# ============================================================================
+# 'busi'     : 3 classes (normal, benign, malignant), masks may be split across files
+# 'busi_whu' : 2 classes (benign, malignant)
+DATASET = 'busi'
+
+BUSI_CATEGORIES = ['normal', 'benign', 'malignant']
+WHU_CATEGORIES = ['benign', 'malignant']
+
+CATEGORIES = BUSI_CATEGORIES if DATASET == 'busi' else WHU_CATEGORIES
+NUM_CLF_CLASSES = len(CATEGORIES)
 
 # ============================================================================
 # MODEL ARCHITECTURE
@@ -19,8 +32,12 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 INPUT_SIZE = (224, 224, 3)
 DECODER_CHANNELS = [384, 192, 96, 48]
 NUM_SEG_CLASSES = 1
-NUM_CLF_CLASSES = 3
 DROPOUT_RATE = 0.3
+FREEZE_LAYERS = 50
+
+# TIM modulation. Both factors are sigmoid-bounded, so mu lies in [1, 1+TAU]:
+# the modulation can amplify but not attenuate.
+TAU = 0.7
 
 # ============================================================================
 # TRAINING HYPERPARAMETERS
@@ -30,12 +47,10 @@ VAL_BATCH_SIZE = 24
 EPOCHS = 100
 WARMUP_EPOCHS = 3
 
-# Learning rate
 INITIAL_LR = 3.0e-4
 MIN_LR = 1.5e-6
 COSINE_ALPHA = 0.03
 
-# Optimizer
 ADAM_BETA_1 = 0.91
 ADAM_BETA_2 = 0.999
 ADAM_EPSILON = 1e-07
@@ -44,9 +59,12 @@ GLOBAL_CLIPNORM = 1.0
 # ============================================================================
 # DATA SPLIT
 # ============================================================================
-TRAIN_SPLIT = 0.70  # 70%
-VAL_SPLIT = 0.15    # 15%
-TEST_SPLIT = 0.15   # 15%
+# These values are now actually used by data_loader.py. The previous release
+# declared 70/15/15 here but hard-coded a 60/15/25 split in the loader, so the
+# constants below had no effect. The loader has been corrected to read them.
+TRAIN_SPLIT = 0.70
+VAL_SPLIT = 0.15
+TEST_SPLIT = 0.15
 RANDOM_STATE = 42
 
 # ============================================================================
@@ -60,7 +78,7 @@ CLF_WEIGHT_FINAL = 0.20
 # ============================================================================
 # CALLBACKS
 # ============================================================================
-EARLY_STOPPING_PATIENCE = 22
+EARLY_STOPPING_PATIENCE = 10   # matches the value reported in the paper
 EARLY_STOPPING_MIN_DELTA = 0.004
 REDUCE_LR_PATIENCE = 7
 REDUCE_LR_FACTOR = 0.55
@@ -69,15 +87,17 @@ MONITOR = "val_combined"
 MODE = "max"
 
 # ============================================================================
+# EVALUATION
+# ============================================================================
+# Threshold applied to the sigmoid segmentation output before computing
+# foreground IoU and Dice. See evaluate.py.
+SEG_THRESHOLD = 0.5
+
+# ============================================================================
 # AUGMENTATION
 # ============================================================================
 HORIZONTAL_FLIP_PROB = 0.5
 VERTICAL_FLIP_PROB = 0.5
 ROTATION_LIMIT = 15
 ROTATION_PROB = 0.7
-NUM_AUGMENTATIONS = 3  # Generate 3 augmented versions per sample
-
-# ============================================================================
-# CATEGORIES
-# ============================================================================
-CATEGORIES = ['normal', 'benign', 'malignant']
+NUM_AUGMENTATIONS = 3

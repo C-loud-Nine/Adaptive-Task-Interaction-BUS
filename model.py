@@ -3,25 +3,25 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB4
 
 from modules import (
-    HCTResidualBlock,
-    HCTAttentionGate,
+    ResidualBlock,
+    AttentionGate,
     TaskInteractionModule,
-    UncertaintyGuidedAttention,
+    AdaptiveInteractionWeighting,
 )
 
 
 def build_decoder_block(prev, skip, channels, dropout_rate, block_name):
-    """Upsample → attention gate → concat → residual block → dropout."""
+    """Upsample, attention gate, concatenate, residual block, dropout."""
     x    = layers.Conv2DTranspose(channels, 3, strides=2, padding='same')(prev)
-    att  = HCTAttentionGate(channels // 2, name=f'att_gate_{block_name}')(skip, x)
+    att  = AttentionGate(channels // 2, name=f'att_gate_{block_name}')(skip, x)
     x    = layers.Concatenate()([x, att])
-    x    = HCTResidualBlock(channels, use_attention=False, name=f'hct_res_{block_name}')(x)
+    x    = ResidualBlock(channels, use_attention=False, name=f'res_{block_name}')(x)
     x    = layers.Dropout(dropout_rate)(x)
     return x
 
 
-def build_tim_uga(decoder_out, encoder_feat, seg_channels, level_name, dropout_rate):
-    """Attach TIM + UGA to a decoder level. Returns (seg_final, clf_final)."""
+def build_tim_aiw(decoder_out, encoder_feat, seg_channels, level_name, dropout_rate):
+    """Attach TIM and AIW to a decoder level. Returns (seg_final, clf_final)."""
     clf_raw = layers.GlobalAveragePooling2D()(encoder_feat)
     clf_raw = layers.Dense(256, activation='relu', name=f'clf_{level_name}_features')(clf_raw)
 
@@ -29,13 +29,13 @@ def build_tim_uga(decoder_out, encoder_feat, seg_channels, level_name, dropout_r
                                 name=f'task_interaction_{level_name}')
     seg_enh, clf_enh = tim(decoder_out, clf_raw)
 
-    uga = UncertaintyGuidedAttention(name=f'uncertainty_attention_{level_name}')
-    seg_final, clf_final = uga(decoder_out, seg_enh, clf_raw, clf_enh)
+    aiw = AdaptiveInteractionWeighting(name=f'aiw_{level_name}')
+    seg_final, clf_final = aiw(decoder_out, seg_enh, clf_raw, clf_enh)
 
     return seg_final, clf_final
 
 
-def enhanced_hct_model(
+def adaptive_task_interaction_model(
     input_size=(224, 224, 3),
     num_seg_classes=1,
     num_clf_classes=3,
@@ -44,7 +44,7 @@ def enhanced_hct_model(
 ):
     """
     Multi-task segmentation + classification model.
-    TIM and UGA are applied at all four decoder levels (D1–D4).
+    TIM and AIW are applied at all four decoder levels (D1-D4).
     """
     # ------------------------------------------------------------------
     # ENCODER  (EfficientNetB4, ImageNet weights)
@@ -53,41 +53,41 @@ def enhanced_hct_model(
     for layer in base.layers[:50]:
         layer.trainable = False
 
-    s1     = base.get_layer('block2a_expand_activation').output   # 56×56
-    s2     = base.get_layer('block3a_expand_activation').output   # 28×28
-    s3     = base.get_layer('block4a_expand_activation').output   # 14×14
-    s4     = base.get_layer('block6a_expand_activation').output   #  7×7
-    bridge = base.get_layer('top_activation').output              #  7×7
+    s1     = base.get_layer('block2a_expand_activation').output   # 56x56
+    s2     = base.get_layer('block3a_expand_activation').output   # 28x28
+    s3     = base.get_layer('block4a_expand_activation').output   # 14x14
+    s4     = base.get_layer('block6a_expand_activation').output   #  7x7
+    bridge = base.get_layer('top_activation').output              #  7x7
 
-    s1_e = HCTResidualBlock(144,  use_attention=True, name='hct_res_s1')(s1)
-    s2_e = HCTResidualBlock(192,  use_attention=True, name='hct_res_s2')(s2)
-    s3_e = HCTResidualBlock(336,  use_attention=True, name='hct_res_s3')(s3)
-    s4_e = HCTResidualBlock(960,  use_attention=True, name='hct_res_s4')(s4)
-    br_e = HCTResidualBlock(1792, use_attention=True, name='hct_res_bridge')(bridge)
+    s1_e = ResidualBlock(144,  use_attention=True, name='res_s1')(s1)
+    s2_e = ResidualBlock(192,  use_attention=True, name='res_s2')(s2)
+    s3_e = ResidualBlock(336,  use_attention=True, name='res_s3')(s3)
+    s4_e = ResidualBlock(960,  use_attention=True, name='res_s4')(s4)
+    br_e = ResidualBlock(1792, use_attention=True, name='res_bridge')(bridge)
 
     # ------------------------------------------------------------------
-    # DECODER  (4 levels, each followed by TIM + UGA)
+    # DECODER  (4 levels, each followed by TIM and AIW)
     # ------------------------------------------------------------------
     decoder_channels = [384, 192, 96, 48]
 
-    # D1 — 7×7 → 14×14
+    # D1: 7x7 -> 14x14
     d1 = build_decoder_block(br_e, s4_e, decoder_channels[0], dropout_rate, 'd1')
-    d1_final, clf_d1 = build_tim_uga(d1, br_e,  decoder_channels[0], 'd1', dropout_rate)
+    d1_final, clf_d1 = build_tim_aiw(d1, br_e,  decoder_channels[0], 'd1', dropout_rate)
 
-    # D2 — 14×14 → 28×28
+    # D2: 14x14 -> 28x28
     d2 = build_decoder_block(d1_final, s3_e, decoder_channels[1], dropout_rate, 'd2')
-    d2_final, clf_d2 = build_tim_uga(d2, s4_e, decoder_channels[1], 'd2', dropout_rate)
+    d2_final, clf_d2 = build_tim_aiw(d2, s4_e, decoder_channels[1], 'd2', dropout_rate)
 
-    # D3 — 28×28 → 56×56
+    # D3: 28x28 -> 56x56
     d3 = build_decoder_block(d2_final, s2_e, decoder_channels[2], dropout_rate, 'd3')
-    d3_final, clf_d3 = build_tim_uga(d3, s3_e, decoder_channels[2], 'd3', dropout_rate)
+    d3_final, clf_d3 = build_tim_aiw(d3, s3_e, decoder_channels[2], 'd3', dropout_rate)
 
-    # D4 — 56×56 → 112×112
+    # D4: 56x56 -> 112x112
     d4 = build_decoder_block(d3_final, s1_e, decoder_channels[3], dropout_rate, 'd4')
-    d4_final, clf_d4 = build_tim_uga(d4, s2_e, decoder_channels[3], 'd4', dropout_rate)
+    d4_final, clf_d4 = build_tim_aiw(d4, s2_e, decoder_channels[3], 'd4', dropout_rate)
 
     # ------------------------------------------------------------------
-    # SEGMENTATION HEAD  (112×112 → 224×224)
+    # SEGMENTATION HEAD (112x112 -> 224x224)
     # ------------------------------------------------------------------
     seg = layers.Conv2DTranspose(24, 3, strides=2, padding='same')(d4_final)
     seg = layers.Conv2D(16, 3, padding='same', activation='relu')(seg)
@@ -116,6 +116,6 @@ def enhanced_hct_model(
     model = models.Model(
         inputs=base.input,
         outputs=[seg_output, clf_output],
-        name='enhanced_hct_model',
+        name='adaptive_task_interaction_model',
     )
     return model
