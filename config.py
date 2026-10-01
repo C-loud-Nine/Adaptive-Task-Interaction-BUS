@@ -59,9 +59,6 @@ GLOBAL_CLIPNORM = 1.0
 # ============================================================================
 # DATA SPLIT
 # ============================================================================
-# These values are now actually used by data_loader.py. The previous release
-# declared 70/15/15 here but hard-coded a 60/15/25 split in the loader, so the
-# constants below had no effect. The loader has been corrected to read them.
 TRAIN_SPLIT = 0.70
 VAL_SPLIT = 0.15
 TEST_SPLIT = 0.15

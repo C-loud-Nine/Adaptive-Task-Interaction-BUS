@@ -1,17 +1,8 @@
 """
 Data loading and preprocessing for BUSI and BUSI-WHU.
 
-Two changes from the earlier release:
-
-1. BUSI-WHU is now supported. The previous version was BUSI-only, so the
-   BUSI-WHU results reported in the paper could not be reproduced from it.
-
-2. The split now reads TRAIN/VAL/TEST_SPLIT from config.py. The previous
-   loader declared 70/15/15 in config but hard-coded 0.40 then 0.625, giving
-   60/15/25. The constants are now honoured, so the code matches the protocol
-   stated in the paper.
-
-The shuffle after augmentation is also seeded, which it previously was not.
+Splits are stratified by class and read from TRAIN/VAL/TEST_SPLIT in config.py.
+Augmentation is applied to the training split only.
 """
 
 import os

@@ -1,12 +1,6 @@
 """
 Evaluation: computes the metrics reported in the paper.
 
-This script did not exist in the earlier release, which exposed only
-`MeanIoU(num_classes=2)` during training. That metric averages foreground and
-background IoU and is applied to unthresholded sigmoid outputs, so it does not
-correspond to the foreground IoU the paper reports. Everything reported in the
-paper should be reproduced with this script.
-
 Segmentation : foreground IoU, Dice, sensitivity, precision (threshold 0.5)
 Classification: accuracy, weighted F1, AUC, per-class report
 

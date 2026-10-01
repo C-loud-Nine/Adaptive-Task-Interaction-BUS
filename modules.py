@@ -1,20 +1,13 @@
 """
 Network modules for adaptive bidirectional decoder-level task interaction.
 
-Naming note: this module was previously released under different class names.
-The mapping is:
-
-    HCTMultiScaleFusion        -> MultiScaleContextFusion    (MSCF)
-    HCTDualPathAttention       -> DualPathAttention
-    HCTResidualBlock           -> ResidualBlock
-    HCTAttentionGate           -> AttentionGate
-    TaskInteractionModule      -> TaskInteractionModule      (TIM, unchanged)
-    UncertaintyGuidedAttention -> AdaptiveInteractionWeighting (AIW)
-
-The computation is unchanged by the rename. One genuine change: the unused
-`task_context` branch of DualPathAttention has been removed, because no call
-site ever supplied it and it therefore contributed nothing to any reported
-result.
+    MultiScaleContextFusion      (MSCF)  three dilated separable convolutions
+                                         with softmax scale competition
+    DualPathAttention                    channel and spatial attention
+    ResidualBlock                        residual block wrapping MSCF
+    AttentionGate                        gated skip connections
+    TaskInteractionModule        (TIM)   bidirectional cross-task exchange
+    AdaptiveInteractionWeighting (AIW)   per-image, per-level blend coefficient
 """
 
 import tensorflow as tf
@@ -61,11 +54,7 @@ class MultiScaleContextFusion(layers.Layer):
 
 
 class DualPathAttention(layers.Layer):
-    """Channel and spatial attention, in the manner of CBAM.
-
-    The `task_context` branch present in the earlier release has been removed:
-    no call site ever passed it, so it was unreachable.
-    """
+    """Channel and spatial attention, in the manner of CBAM."""
 
     def __init__(self, channels, **kwargs):
         super().__init__(**kwargs)

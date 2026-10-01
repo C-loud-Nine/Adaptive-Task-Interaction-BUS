@@ -6,19 +6,6 @@
 
 Official implementation.
 
-> **Note on naming.** This repository was previously released as
-> *Uncertainty-Aware Multi-Level Decoder Interaction*. The adaptive weighting
-> module computes activation-dispersion statistics, which are descriptive
-> statistics of the activations rather than estimates of predictive
-> uncertainty, so the module has been renamed and the uncertainty framing
-> removed. The computation is unchanged.
->
-> | Previous name | Current name |
-> |---|---|
-> | Uncertainty Proxy Attention (UPA) | Adaptive Interaction Weighting (AIW) |
-> | Hierarchical Multi-Scale Fusion (HMSF) | Multi-Scale Context Fusion (MSCF) |
-> | Task Interaction Module (TIM) | unchanged |
-
 ---
 
 ## Overview
@@ -112,9 +99,8 @@ python evaluate.py --weights checkpoints/best_model.h5 --dataset busi
 ```
 
 `evaluate.py` is the script that produces the numbers in the tables above.
-Note that the `MeanIoU` metric printed during training averages foreground and
-background IoU on unthresholded outputs, so it is not comparable to the
-foreground IoU reported in the paper; use `evaluate.py` for reporting.
+`MeanIoU` is also printed during training, but it averages foreground and
+background IoU on unthresholded outputs, so use `evaluate.py` for reporting.
 
 ---
 
@@ -150,22 +136,6 @@ These are stated so that the code and the paper can be read together.
   removed here.
 - **The boundary loss term is computed on binarised masks**, as defined in the
   paper.
-
-## Changes from the previous release
-
-- Module renames (table at the top); computation unchanged.
-- BUSI-WHU loading added. The previous release was BUSI-only, so the BUSI-WHU
-  results could not be reproduced from it.
-- `evaluate.py` added, computing the foreground IoU and Dice reported in the paper.
-- The data split now reads `TRAIN/VAL/TEST_SPLIT` from `config.py`. The previous
-  loader declared 70/15/15 in config but hard-coded 60/15/25, so the constants
-  had no effect.
-- The post-augmentation shuffle is now seeded.
-- Removed an unused `task_context` branch in `DualPathAttention` that no call
-  site invoked.
-- README numbers corrected to match the paper.
-- Architecture and qualitative figures temporarily removed pending relabelling;
-  the previous versions carried the old module names.
 
 ## Citation
 
