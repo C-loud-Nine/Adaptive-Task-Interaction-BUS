@@ -1,23 +1,12 @@
-# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.venv/
-venv/
+.ipynb_checkpoints/
 
-# Created automatically by config.py
+# data, weights and outputs are not tracked
+data/
 checkpoints/
 results/
-
-# Data (not redistributed; see README for sources)
-data/
-
-# Weights and logs
+logs/
 *.h5
 *.keras
-*.ckpt
-logs/
-*.log
-
-# OS
-.DS_Store
+*.ckpt*

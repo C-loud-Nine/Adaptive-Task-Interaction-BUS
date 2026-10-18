@@ -1,17 +1,34 @@
 """
-Evaluation: computes the metrics reported in the paper.
+evaluate.py - per-image evaluation export for the breast ultrasound model.
 
-Segmentation : foreground IoU, Dice, sensitivity, precision (threshold 0.5)
-Classification: accuracy, weighted F1, AUC, per-class report
+ADDITIVE. Trains nothing and changes nothing in the model or the data
+pipeline. Run it against an existing checkpoint to answer the question that
+blocks submission: do the reported table values reconstruct from integer
+counts and per-image metrics?
 
-Images with an empty ground-truth mask (BUSI 'normal') are excluded from the
-segmentation metrics and counted separately, since foreground overlap is
-undefined for them. They are retained for classification.
+What it writes to config.RESULTS_DIR:
+  predictions_<tag>.csv   one row per test image, including the four AIW
+                          weight pairs for that image
+  confusion_<tag>.csv     confusion matrix, entries sum to N
+  summary_<tag>.json      aggregates, each stated with its denominator
 
-Usage
------
-    python evaluate.py --weights checkpoints/best_model.h5
-    python evaluate.py --weights checkpoints/whu.h5 --dataset busi_whu
+Why each column exists:
+  * Accuracy must equal 100 * (integer correct) / N, so every reported
+    accuracy has to be a multiple of 100/N. The CSV makes the integer count
+    and the denominator visible instead of inferred.
+  * IoU and Dice are computed from the SAME per-image TP/FP/FN at the SAME
+    threshold, so the per-image identity Dice = 2*IoU/(1+IoU) holds exactly
+    and the aggregate obeys mean Dice <= 2*mIoU/(1+mIoU). The summary prints
+    that ceiling and flags a violation.
+  * Empty-ground-truth cases are reported separately rather than silently
+    dropped or counted as zero, because that choice alone moves the mean.
+  * AIW normalises its two dispersion statistics over the CURRENT BATCH, so
+    the evaluation batch size changes the predictions. It is recorded in the
+    summary and in the default tag.
+
+Usage:
+    python evaluate.py --checkpoint checkpoints/best.keras
+    python evaluate.py --checkpoint checkpoints/best.keras --batch-size 1
 """
 
 import argparse
@@ -19,110 +36,212 @@ import json
 import os
 
 import numpy as np
-from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
-                             classification_report, confusion_matrix)
+import tensorflow as tf
 
 import config
 import data_loader
-from model import adaptive_task_interaction_model
+import modules
+
+THRESHOLD = 0.5
+EPS = 1e-7
+
+CUSTOM_OBJECTS = {
+    "MultiScaleContextFusion": modules.MultiScaleContextFusion,
+    "DualPathAttention": modules.DualPathAttention,
+    "ResidualBlock": modules.ResidualBlock,
+    "AttentionGate": modules.AttentionGate,
+    "TaskInteractionModule": modules.TaskInteractionModule,
+    "AdaptiveInteractionWeighting": modules.AdaptiveInteractionWeighting,
+}
 
 
-def foreground_iou_dice(y_true, y_pred, threshold=0.5):
-    """Foreground IoU and Dice for one image. Returns (nan, nan) if the mask is empty."""
-    t = (np.asarray(y_true).squeeze() > 0.5)
-    p = (np.asarray(y_pred).squeeze() > threshold)
-    if t.sum() == 0:
-        return np.nan, np.nan, np.nan, np.nan
-    inter = np.logical_and(t, p).sum()
-    union = np.logical_or(t, p).sum()
-    iou = inter / union if union > 0 else np.nan
-    denom = t.sum() + p.sum()
-    dice = 2.0 * inter / denom if denom > 0 else np.nan
-    sens = inter / t.sum()
-    prec = inter / p.sum() if p.sum() > 0 else np.nan
-    return iou, dice, sens, prec
+def per_image_overlap(y_true, y_pred_prob, threshold=THRESHOLD):
+    """Return per-image TP, FP, FN, IoU, Dice over FOREGROUND pixels.
+
+    IoU and Dice come from one set of counts, so they cannot disagree. An
+    empty ground truth is reported as NaN rather than 1.0 or 0.0: it has no
+    foreground to overlap, and forcing a value is what makes aggregate IoU and
+    Dice drift apart.
+    """
+    t = (y_true > 0.5).astype(np.float64).reshape(len(y_true), -1)
+    p = (y_pred_prob > threshold).astype(np.float64).reshape(len(y_pred_prob), -1)
+
+    tp = (t * p).sum(axis=1)
+    fp = ((1.0 - t) * p).sum(axis=1)
+    fn = (t * (1.0 - p)).sum(axis=1)
+
+    has_fg = t.sum(axis=1) > 0
+    iou = np.where(has_fg, tp / np.maximum(tp + fp + fn, EPS), np.nan)
+    dice = np.where(has_fg, 2.0 * tp / np.maximum(2.0 * tp + fp + fn, EPS), np.nan)
+    return tp, fp, fn, iou, dice, has_fg
 
 
-def evaluate_segmentation(masks_true, masks_pred, threshold=0.5):
-    ious, dices, sens, precs = [], [], [], []
-    n_empty = 0
-    for t, p in zip(masks_true, masks_pred):
-        if (np.asarray(t).squeeze() > 0.5).sum() == 0:
-            n_empty += 1
-            continue
-        i, d, s, pr = foreground_iou_dice(t, p, threshold)
-        ious.append(i); dices.append(d); sens.append(s); precs.append(pr)
-    return {
-        'iou': float(np.nanmean(ious) * 100),
-        'dice': float(np.nanmean(dices) * 100),
-        'sensitivity': float(np.nanmean(sens) * 100),
-        'precision': float(np.nanmean(precs) * 100),
-        'n_evaluated': len(ious),
-        'n_empty_masks_excluded': n_empty,
-        'threshold': threshold,
-    }
+def build_weight_export_model(model):
+    """Expose the AIW weights of every level as real model outputs.
 
+    Uses AdaptiveInteractionWeighting.compute_weights on the layer's own input
+    tensors, so the exported values are the ones the blend actually used. This
+    replaces reading cached layer attributes after predict(), which only ever
+    hold the final batch.
 
-def evaluate_classification(y_true, y_prob, class_names):
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_prob).argmax(axis=1)
-    n_classes = np.asarray(y_prob).shape[1]
-    try:
-        auc = (roc_auc_score(y_true, y_prob[:, 1]) if n_classes == 2
-               else roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro'))
-    except ValueError:
-        auc = float('nan')
-    return {
-        'accuracy': float(accuracy_score(y_true, y_pred) * 100),
-        'weighted_f1': float(f1_score(y_true, y_pred, average='weighted') * 100),
-        'macro_f1': float(f1_score(y_true, y_pred, average='macro') * 100),
-        'auc': float(auc * 100),
-        'confusion_matrix': confusion_matrix(y_true, y_pred).tolist(),
-        'per_class': classification_report(y_true, y_pred,
-                                           target_names=class_names,
-                                           output_dict=True, zero_division=0),
-    }
+    Returns (export_model, level_names). level_names is empty if the AIW
+    layers cannot be located, in which case the weight columns are omitted
+    rather than invented.
+    """
+    names, outs = [], []
+    for lvl in ["d1", "d2", "d3", "d4"]:
+        try:
+            layer = model.get_layer(f"aiw_{lvl}")
+        except ValueError:
+            print(f"[warn] layer 'aiw_{lvl}' not found; AIW weights not exported")
+            return model, []
+        ins = layer.input
+        if not isinstance(ins, (list, tuple)) or len(ins) != 4:
+            print(f"[warn] unexpected inputs on 'aiw_{lvl}'; AIW weights not exported")
+            return model, []
+        outs.append(layer.compute_weights(ins[1], ins[3]))   # (seg_enh, clf_enh)
+        names.append(lvl)
+    return tf.keras.Model(model.inputs, list(model.outputs) + outs), names
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--weights', required=True, help='path to trained weights')
-    ap.add_argument('--dataset', default=config.DATASET, choices=['busi', 'busi_whu'])
-    ap.add_argument('--threshold', type=float, default=config.SEG_THRESHOLD)
-    ap.add_argument('--out', default=os.path.join(config.RESULTS_DIR, 'evaluation.json'))
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--tag", default=None)
+    ap.add_argument("--batch-size", type=int, default=config.VAL_BATCH_SIZE,
+                    help="AIW normalises over the evaluation batch, so this "
+                         "value changes the predictions. It is recorded.")
     args = ap.parse_args()
+    tag = args.tag or f"busi_bs{args.batch_size}"
 
-    categories = (config.BUSI_CATEGORIES if args.dataset == 'busi'
-                  else config.WHU_CATEGORIES)
+    print(f"[load] {args.checkpoint}")
+    model = tf.keras.models.load_model(
+        args.checkpoint, compile=False, custom_objects=CUSTOM_OBJECTS)
 
-    data = data_loader.prepare_datasets(dataset=args.dataset)
-    model = adaptive_task_interaction_model(
-        input_size=config.INPUT_SIZE,
-        num_seg_classes=config.NUM_SEG_CLASSES,
-        num_clf_classes=len(categories),
-        dropout_rate=config.DROPOUT_RATE,
-    )
-    model.load_weights(args.weights)
+    data = data_loader.prepare_datasets(config.BUSI_PATH)
+    X_test = data["X_test"]
+    y_test = np.asarray(data["y_test"]).astype(int)
+    mask_gt = np.asarray(data["mask_test"])
+    if mask_gt.ndim == 4:
+        mask_gt = mask_gt[..., 0]
+    n = len(X_test)
+    print(f"[data] test images N = {n}  (grid step = {100.0 / n:.4f} accuracy points)")
 
-    seg_pred, clf_pred = model.predict(data['X_test'], batch_size=config.VAL_BATCH_SIZE)
+    export, levels = build_weight_export_model(model)
+    preds = export.predict(X_test, batch_size=args.batch_size, verbose=1)
 
-    results = {
-        'dataset': args.dataset,
-        'n_test': int(len(data['X_test'])),
-        'segmentation': evaluate_segmentation(data['mask_test'], seg_pred, args.threshold),
-        'classification': evaluate_classification(data['y_test'], clf_pred, categories),
+    seg_prob = np.asarray(preds[0])
+    if seg_prob.ndim == 4:
+        seg_prob = seg_prob[..., 0]
+    clf_prob = np.asarray(preds[1])
+    weights = [np.asarray(w).reshape(len(X_test), -1) for w in preds[2:]] if levels else []
+
+    # Hard guarantee: nothing silently truncated to the last batch.
+    assert len(seg_prob) == n and len(clf_prob) == n, "prediction length != N"
+    for lvl, w in zip(levels, weights):
+        assert len(w) == n, f"aiw_{lvl} has {len(w)} rows, expected {n}"
+
+    clf_pred = clf_prob.argmax(axis=1)
+    tp, fp, fn, iou, dice, has_fg = per_image_overlap(mask_gt, seg_prob)
+    correct = (clf_pred == y_test)
+    n_correct = int(correct.sum())
+
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    cls = config.CATEGORIES
+
+    # ---- per-image CSV ---------------------------------------------------
+    path = os.path.join(config.RESULTS_DIR, f"predictions_{tag}.csv")
+    wcols = [f"w_{k}_{lvl}" for lvl in levels for k in ("seg", "clf")]
+    with open(path, "w") as f:
+        f.write("index,true_class,pred_class,correct,max_prob," +
+                ",".join(f"p_{c}" for c in cls) +
+                ",tp,fp,fn,iou,dice,has_foreground" +
+                ("," + ",".join(wcols) if wcols else "") + "\n")
+        for i in range(n):
+            row = [str(i), cls[y_test[i]], cls[clf_pred[i]], str(int(correct[i])),
+                   f"{clf_prob[i].max():.6f}"]
+            row += [f"{v:.6f}" for v in clf_prob[i]]
+            row += [f"{tp[i]:.0f}", f"{fp[i]:.0f}", f"{fn[i]:.0f}",
+                    f"{iou[i]:.6f}", f"{dice[i]:.6f}", str(int(has_fg[i]))]
+            for w in weights:
+                row += [f"{v:.6f}" for v in w[i]]
+            f.write(",".join(row) + "\n")
+    print(f"[write] {path}")
+
+    # ---- confusion matrix ------------------------------------------------
+    k = len(cls)
+    cm = np.zeros((k, k), dtype=int)
+    for t_, p_ in zip(y_test, clf_pred):
+        cm[t_, p_] += 1
+    assert cm.sum() == n, "confusion matrix does not sum to N"
+    cpath = os.path.join(config.RESULTS_DIR, f"confusion_{tag}.csv")
+    with open(cpath, "w") as f:
+        f.write("true\\pred," + ",".join(cls) + "\n")
+        for i, c in enumerate(cls):
+            f.write(c + "," + ",".join(str(v) for v in cm[i]) + "\n")
+    print(f"[write] {cpath}")
+
+    # ---- aggregates, each with its denominator ---------------------------
+    per_class, f1s, recs = {}, [], []
+    for i, c in enumerate(cls):
+        tp_c = int(cm[i, i])
+        fn_c = int(cm[i].sum()) - tp_c
+        fp_c = int(cm[:, i].sum()) - tp_c
+        prec = tp_c / max(tp_c + fp_c, 1)
+        rec = tp_c / max(tp_c + fn_c, 1)
+        f1 = 2 * prec * rec / max(prec + rec, EPS)
+        per_class[c] = {"support": int(cm[i].sum()), "precision": prec,
+                        "recall": rec, "f1": f1}
+        f1s.append(f1)
+        recs.append(rec)
+
+    n_fg = int(has_fg.sum())
+    summary = {
+        "checkpoint": args.checkpoint,
+        "dataset": "busi",
+        "eval_batch_size": args.batch_size,
+        "threshold": THRESHOLD,
+        "n_test_images": n,
+        "n_correct": n_correct,
+        "accuracy_percent": 100.0 * n_correct / n,
+        "accuracy_grid_step_percent": 100.0 / n,
+        "macro_f1_percent": 100.0 * float(np.mean(f1s)),
+        "balanced_accuracy_percent": 100.0 * float(np.mean(recs)),
+        "n_positive_mask_images": n_fg,
+        "mean_iou_percent": float(np.nanmean(iou) * 100.0),
+        "mean_dice_percent": float(np.nanmean(dice) * 100.0),
+        "median_dice_percent": float(np.nanmedian(dice) * 100.0),
+        "per_class": per_class,
+        "aiw_levels_exported": levels,
     }
+    m = summary["mean_iou_percent"] / 100.0
+    summary["max_mean_dice_implied_by_mean_iou_percent"] = 100.0 * 2 * m / (1 + m)
+    summary["dice_within_ceiling"] = bool(
+        summary["mean_dice_percent"]
+        <= summary["max_mean_dice_implied_by_mean_iou_percent"] + 1e-9)
+    if levels:
+        summary["mean_aiw_weights"] = {
+            f"{lvl}": {"w_seg": float(w[:, 0].mean()), "w_clf": float(w[:, 1].mean())}
+            for lvl, w in zip(levels, weights)}
 
-    print(json.dumps({k: v for k, v in results.items() if k != 'classification'}, indent=2))
-    print("accuracy      : %.2f" % results['classification']['accuracy'])
-    print("weighted F1   : %.2f" % results['classification']['weighted_f1'])
-    print("AUC           : %.2f" % results['classification']['auc'])
+    spath = os.path.join(config.RESULTS_DIR, f"summary_{tag}.json")
+    with open(spath, "w") as f:
+        json.dump(summary, f, indent=2)
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"\nWritten to {args.out}")
+    print("\n================ RECONSTRUCTION CHECK ================")
+    print(f"  accuracy    = {n_correct}/{n} = {summary['accuracy_percent']:.4f}%")
+    print(f"  grid step   = {summary['accuracy_grid_step_percent']:.4f} points")
+    print(f"                any reported accuracy must be a multiple of this")
+    print(f"  macro-F1    = {summary['macro_f1_percent']:.4f}%")
+    print(f"  balanced acc= {summary['balanced_accuracy_percent']:.4f}%")
+    print(f"  mean IoU    = {summary['mean_iou_percent']:.4f}% over {n_fg} positive-mask images")
+    print(f"  mean Dice   = {summary['mean_dice_percent']:.4f}%  "
+          f"(ceiling {summary['max_mean_dice_implied_by_mean_iou_percent']:.4f}%, "
+          f"{'OK' if summary['dice_within_ceiling'] else 'VIOLATED'})")
+    print(f"  AIW levels exported: {levels or 'none'}")
+    print("======================================================")
+    print(f"[write] {spath}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

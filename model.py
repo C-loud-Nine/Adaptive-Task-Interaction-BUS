@@ -11,7 +11,7 @@ from modules import (
 
 
 def build_decoder_block(prev, skip, channels, dropout_rate, block_name):
-    """Upsample, attention gate, concatenate, residual block, dropout."""
+    """Upsample → attention gate → concat → residual block → dropout."""
     x    = layers.Conv2DTranspose(channels, 3, strides=2, padding='same')(prev)
     att  = AttentionGate(channels // 2, name=f'att_gate_{block_name}')(skip, x)
     x    = layers.Concatenate()([x, att])
@@ -21,7 +21,7 @@ def build_decoder_block(prev, skip, channels, dropout_rate, block_name):
 
 
 def build_tim_aiw(decoder_out, encoder_feat, seg_channels, level_name, dropout_rate):
-    """Attach TIM and AIW to a decoder level. Returns (seg_final, clf_final)."""
+    """Attach TIM + AIW to a decoder level. Returns (seg_final, clf_final)."""
     clf_raw = layers.GlobalAveragePooling2D()(encoder_feat)
     clf_raw = layers.Dense(256, activation='relu', name=f'clf_{level_name}_features')(clf_raw)
 
@@ -35,7 +35,7 @@ def build_tim_aiw(decoder_out, encoder_feat, seg_channels, level_name, dropout_r
     return seg_final, clf_final
 
 
-def adaptive_task_interaction_model(
+def adaptive_interaction_model(
     input_size=(224, 224, 3),
     num_seg_classes=1,
     num_clf_classes=3,
@@ -53,11 +53,11 @@ def adaptive_task_interaction_model(
     for layer in base.layers[:50]:
         layer.trainable = False
 
-    s1     = base.get_layer('block2a_expand_activation').output   # 56x56
-    s2     = base.get_layer('block3a_expand_activation').output   # 28x28
-    s3     = base.get_layer('block4a_expand_activation').output   # 14x14
-    s4     = base.get_layer('block6a_expand_activation').output   #  7x7
-    bridge = base.get_layer('top_activation').output              #  7x7
+    s1     = base.get_layer('block2a_expand_activation').output   # 56×56
+    s2     = base.get_layer('block3a_expand_activation').output   # 28×28
+    s3     = base.get_layer('block4a_expand_activation').output   # 14×14
+    s4     = base.get_layer('block6a_expand_activation').output   #  7×7
+    bridge = base.get_layer('top_activation').output              #  7×7
 
     s1_e = ResidualBlock(144,  use_attention=True, name='res_s1')(s1)
     s2_e = ResidualBlock(192,  use_attention=True, name='res_s2')(s2)
@@ -66,28 +66,28 @@ def adaptive_task_interaction_model(
     br_e = ResidualBlock(1792, use_attention=True, name='res_bridge')(bridge)
 
     # ------------------------------------------------------------------
-    # DECODER  (4 levels, each followed by TIM and AIW)
+    # DECODER  (4 levels, each followed by TIM + AIW)
     # ------------------------------------------------------------------
     decoder_channels = [384, 192, 96, 48]
 
-    # D1: 7x7 -> 14x14
+    # D1 — 7×7 → 14×14
     d1 = build_decoder_block(br_e, s4_e, decoder_channels[0], dropout_rate, 'd1')
     d1_final, clf_d1 = build_tim_aiw(d1, br_e,  decoder_channels[0], 'd1', dropout_rate)
 
-    # D2: 14x14 -> 28x28
+    # D2 — 14×14 → 28×28
     d2 = build_decoder_block(d1_final, s3_e, decoder_channels[1], dropout_rate, 'd2')
     d2_final, clf_d2 = build_tim_aiw(d2, s4_e, decoder_channels[1], 'd2', dropout_rate)
 
-    # D3: 28x28 -> 56x56
+    # D3 — 28×28 → 56×56
     d3 = build_decoder_block(d2_final, s2_e, decoder_channels[2], dropout_rate, 'd3')
     d3_final, clf_d3 = build_tim_aiw(d3, s3_e, decoder_channels[2], 'd3', dropout_rate)
 
-    # D4: 56x56 -> 112x112
+    # D4 — 56×56 → 112×112
     d4 = build_decoder_block(d3_final, s1_e, decoder_channels[3], dropout_rate, 'd4')
     d4_final, clf_d4 = build_tim_aiw(d4, s2_e, decoder_channels[3], 'd4', dropout_rate)
 
     # ------------------------------------------------------------------
-    # SEGMENTATION HEAD (112x112 -> 224x224)
+    # SEGMENTATION HEAD  (112×112 → 224×224)
     # ------------------------------------------------------------------
     seg = layers.Conv2DTranspose(24, 3, strides=2, padding='same')(d4_final)
     seg = layers.Conv2D(16, 3, padding='same', activation='relu')(seg)
@@ -116,6 +116,6 @@ def adaptive_task_interaction_model(
     model = models.Model(
         inputs=base.input,
         outputs=[seg_output, clf_output],
-        name='adaptive_task_interaction_model',
+        name='adaptive_interaction_model',
     )
     return model

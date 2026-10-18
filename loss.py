@@ -13,6 +13,7 @@ class GeometricFilters:
         y   = tf.cast(tf.range(k) - (k // 2), tf.float32)
         xx, yy = tf.meshgrid(x, y)
         r2  = xx * xx + yy * yy
+        # sigma = k/4, so the 5x5 kernel used here gives sigma = 1.25.
         sigma   = tf.cast(k / 4.0, tf.float32)
         gaussian = tf.exp(-r2 / (2.0 * (sigma * sigma + eps)))
         f   = (xx * xx - yy * yy) * gaussian
@@ -25,7 +26,14 @@ class GeometricFilters:
 # ============================================================================
 
 def stabilized_tversky_index(y_true, y_pred, alpha=0.5, beta=0.5, smooth=1e-7):
-    """Per-image Tversky index. Returns shape [B]."""
+    """Per-image Tversky index. Returns shape [B].
+
+    WARNING: enhanced_lesion_focus_loss() below calls this WITHOUT alpha or
+    beta, so these symmetric defaults apply and the term reduces to a focal
+    DICE loss. The asymmetric alpha=0.3 / beta=0.7 penalty is not applied
+    anywhere in this repository. If the asymmetric form is intended, pass it
+    explicitly at the call site and re-run every reported result.
+    """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     if y_true.shape.rank == 3:
@@ -59,6 +67,10 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
     if y_pred.shape.rank == 3:
         y_pred = tf.expand_dims(y_pred, -1)
 
+    # NOTE: y_pred is hard-thresholded here, so this term is NOT
+    # differentiable with respect to the mask probabilities. It changes the
+    # logged loss value and can affect checkpoint selection, but supplies no
+    # boundary-training gradient. Treat it as a diagnostic, not a penalty.
     y_true_bin = tf.clip_by_value(tf.cast(y_true > 0.5, tf.float32), 0.0, 1.0)
     y_pred_bin = tf.clip_by_value(tf.cast(y_pred > 0.5, tf.float32), 0.0, 1.0)
 
@@ -74,7 +86,12 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
 
 
 def efficient_texture_consistency(y_true, y_pred):
-    """Sobel gradient std consistency loss (scalar)."""
+    """Horizontal mask-gradient dispersion penalty (scalar).
+
+    Sobel is applied to the MASKS (y_true, y_pred), not to the ultrasound
+    image, so this does not measure image texture. The paper names it
+    accordingly.
+    """
     eps    = 1e-8
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -131,6 +148,9 @@ def enhanced_lesion_focus_loss(y_true, y_pred):
     axes         = [1, 2, 3]
     total_pixels = tf.cast(tf.shape(y_true)[1] * tf.shape(y_true)[2] * tf.shape(y_true)[3], tf.float32)
     lesion_ratio = tf.clip_by_value(tf.reduce_sum(y_true, axis=axes) / tf.maximum(total_pixels, 1.0), 0.0, 1.0)
+    # Factor lies in [1, 2] and attains its MAXIMUM at lesion_ratio = 0, i.e.
+    # on EMPTY masks, not on small lesions. BUSI normal cases are therefore
+    # upweighted most unless excluded upstream.
     size_boost   = 1.0 + tf.clip_by_value(tf.exp(-10.0 * lesion_ratio), 0.0, 2.0)
 
     loss = tf.clip_by_value(base * size_boost + 0.25 * b_vec + 0.15 * t_vec, 0.0, 10.0)
