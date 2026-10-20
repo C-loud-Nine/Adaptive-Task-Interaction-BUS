@@ -27,8 +27,8 @@ Why each column exists:
     summary and in the default tag.
 
 Usage:
-    python evaluate.py --checkpoint checkpoints/best.keras
-    python evaluate.py --checkpoint checkpoints/best.keras --batch-size 1
+    python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5
+    python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5 --batch-size 1
 """
 
 import argparse
@@ -76,15 +76,29 @@ def per_image_overlap(y_true, y_pred_prob, threshold=THRESHOLD):
     return tp, fp, fn, iou, dice, has_fg
 
 
+def _aiw_call_args(layer):
+    """Return the four tensors an AIW layer was called with, in call order.
+
+    Keras stores a multi-input call as node.call_args (positional) and
+    node.call_kwargs (keyword); after loading a saved model the trailing
+    arguments may appear as keywords. layer.input only returns the first
+    positional argument, so it cannot be used here.
+    """
+    node = layer._inbound_nodes[0]
+    args = list(node.call_args)
+    kwargs = node.call_kwargs or {}
+    for key in ("seg_base", "seg_enhanced", "clf_base", "clf_enhanced"):
+        if key in kwargs:
+            args.append(kwargs[key])
+    return args
+
+
 def build_weight_export_model(model):
     """Expose the AIW weights of every level as real model outputs.
 
-    Uses AdaptiveInteractionWeighting.compute_weights on the layer's own input
-    tensors, so the exported values are the ones the blend actually used. This
-    replaces reading cached layer attributes after predict(), which only ever
-    hold the final batch.
-
-    Returns (export_model, level_names). level_names is empty if the AIW
+    Uses AdaptiveInteractionWeighting.compute_weights on the tensors the layer
+    was called with, so the exported values are the ones the blend actually
+    used. Returns (export_model, level_names). level_names is empty if the AIW
     layers cannot be located, in which case the weight columns are omitted
     rather than invented.
     """
@@ -95,8 +109,8 @@ def build_weight_export_model(model):
         except ValueError:
             print(f"[warn] layer 'aiw_{lvl}' not found; AIW weights not exported")
             return model, []
-        ins = layer.input
-        if not isinstance(ins, (list, tuple)) or len(ins) != 4:
+        ins = _aiw_call_args(layer)
+        if len(ins) != 4:
             print(f"[warn] unexpected inputs on 'aiw_{lvl}'; AIW weights not exported")
             return model, []
         outs.append(layer.compute_weights(ins[1], ins[3]))   # (seg_enh, clf_enh)
@@ -108,22 +122,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--dataset", default="busi", choices=["busi", "busi_whu"])
     ap.add_argument("--batch-size", type=int, default=config.VAL_BATCH_SIZE,
                     help="AIW normalises over the evaluation batch, so this "
                          "value changes the predictions. It is recorded.")
     args = ap.parse_args()
-    tag = args.tag or f"busi_bs{args.batch_size}"
+    # default tag follows the checkpoint, so runs and seeds do not overwrite each other
+    tag = args.tag or f"{os.path.splitext(os.path.basename(args.checkpoint))[0]}_bs{args.batch_size}"
 
     print(f"[load] {args.checkpoint}")
     model = tf.keras.models.load_model(
         args.checkpoint, compile=False, custom_objects=CUSTOM_OBJECTS)
 
-    data = data_loader.prepare_datasets(config.BUSI_PATH)
+    path = config.BUSI_WHU_PATH if args.dataset == "busi_whu" else config.BUSI_PATH
+    data = data_loader.prepare_datasets(path, dataset=args.dataset)
     X_test = data["X_test"]
     y_test = np.asarray(data["y_test"]).astype(int)
     mask_gt = np.asarray(data["mask_test"])
     if mask_gt.ndim == 4:
         mask_gt = mask_gt[..., 0]
+    files = data.get("paths_test", np.array([str(i) for i in range(len(X_test))]))
     n = len(X_test)
     print(f"[data] test images N = {n}  (grid step = {100.0 / n:.4f} accuracy points)")
 
@@ -147,18 +165,18 @@ def main():
     n_correct = int(correct.sum())
 
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
-    cls = config.CATEGORIES
+    cls = config.WHU_CLASSES if args.dataset == "busi_whu" else config.CATEGORIES
 
     # ---- per-image CSV ---------------------------------------------------
     path = os.path.join(config.RESULTS_DIR, f"predictions_{tag}.csv")
     wcols = [f"w_{k}_{lvl}" for lvl in levels for k in ("seg", "clf")]
     with open(path, "w") as f:
-        f.write("index,true_class,pred_class,correct,max_prob," +
+        f.write("index,file,true_class,pred_class,correct,max_prob," +
                 ",".join(f"p_{c}" for c in cls) +
                 ",tp,fp,fn,iou,dice,has_foreground" +
                 ("," + ",".join(wcols) if wcols else "") + "\n")
         for i in range(n):
-            row = [str(i), cls[y_test[i]], cls[clf_pred[i]], str(int(correct[i])),
+            row = [str(i), str(files[i]), cls[y_test[i]], cls[clf_pred[i]], str(int(correct[i])),
                    f"{clf_prob[i].max():.6f}"]
             row += [f"{v:.6f}" for v in clf_prob[i]]
             row += [f"{tp[i]:.0f}", f"{fp[i]:.0f}", f"{fn[i]:.0f}",
@@ -195,10 +213,18 @@ def main():
         f1s.append(f1)
         recs.append(rec)
 
+    from sklearn.metrics import f1_score, roc_auc_score
+    weighted_f1 = float(f1_score(y_test, clf_pred, average="weighted"))
+    try:
+        auc = (float(roc_auc_score(y_test, clf_prob[:, 1])) if k == 2 else
+               float(roc_auc_score(y_test, clf_prob, multi_class="ovr", average="macro")))
+    except ValueError:   # a class absent from the test labels
+        auc = None
+
     n_fg = int(has_fg.sum())
     summary = {
         "checkpoint": args.checkpoint,
-        "dataset": "busi",
+        "dataset": args.dataset,
         "eval_batch_size": args.batch_size,
         "threshold": THRESHOLD,
         "n_test_images": n,
@@ -207,7 +233,14 @@ def main():
         "accuracy_grid_step_percent": 100.0 / n,
         "macro_f1_percent": 100.0 * float(np.mean(f1s)),
         "balanced_accuracy_percent": 100.0 * float(np.mean(recs)),
+        "weighted_f1_percent": 100.0 * weighted_f1,
+        "macro_ovr_auc_percent": (100.0 * auc if auc is not None else None),
         "n_positive_mask_images": n_fg,
+        "n_empty_mask_images": int((~has_fg).sum()),
+        "empty_mask_fp_rate_percent": (100.0 * float((fp[~has_fg] > 0).mean())
+                                       if (~has_fg).any() else None),
+        "empty_mask_fg_fraction_percent": (100.0 * float((fp[~has_fg] / mask_gt[0].size).mean())
+                                           if (~has_fg).any() else None),
         "mean_iou_percent": float(np.nanmean(iou) * 100.0),
         "mean_dice_percent": float(np.nanmean(dice) * 100.0),
         "median_dice_percent": float(np.nanmedian(dice) * 100.0),
@@ -234,6 +267,9 @@ def main():
     print(f"                any reported accuracy must be a multiple of this")
     print(f"  macro-F1    = {summary['macro_f1_percent']:.4f}%")
     print(f"  balanced acc= {summary['balanced_accuracy_percent']:.4f}%")
+    print(f"  weighted F1 = {summary['weighted_f1_percent']:.4f}%")
+    if auc is not None:
+        print(f"  macro AUC   = {summary['macro_ovr_auc_percent']:.4f}% (one-vs-rest)")
     print(f"  mean IoU    = {summary['mean_iou_percent']:.4f}% over {n_fg} positive-mask images")
     print(f"  mean Dice   = {summary['mean_dice_percent']:.4f}%  "
           f"(ceiling {summary['max_mean_dice_implied_by_mean_iou_percent']:.4f}%, "

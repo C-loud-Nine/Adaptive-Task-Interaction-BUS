@@ -14,7 +14,6 @@ scipy==1.11.2
 # Computer Vision & Image Processing
 # ============================================================================
 opencv-python==4.8.0.74
-opencv-contrib-python==4.8.0.74
 Pillow==10.0.0
 scikit-image==0.21.0
 

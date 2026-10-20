@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9-3.11](https://img.shields.io/badge/python-3.9--3.11-blue.svg)](https://www.python.org/downloads/)
 [![TensorFlow 2.13](https://img.shields.io/badge/TensorFlow-2.13-orange.svg)](https://tensorflow.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -15,38 +15,32 @@
 ## Overview
 
 Breast ultrasound interpretation requires lesion segmentation and tissue
-classification at the same time, yet conventional multi-task learning confines
-cross-task communication to the shared encoder. Once the two tasks enter
-separate decoders their representations diverge, so complementary information
-is unavailable exactly where spatial reconstruction happens.
+classification at the same time. Most multi-task models for this setting share
+an encoder, and some pass segmentation features to the classifier; once the two
+tasks enter separate decoders they no longer exchange information. This
+repository exchanges latent features in both directions at every decoder level
+and blends original and interacted features with learned coefficients.
 
 This repository implements a framework with three components:
 
 * **TIM (Task Interaction Module)**, applied at all four decoder resolutions,
   giving bidirectional segmentation/classification exchange during decoding.
 * **MSCF (Multi-Scale Context Fusion)**, parallel dilated separable
-  convolutions with instance-adaptive scale weighting, for the 5 to 40 mm
-  lesion size range.
+  convolutions with instance-adaptive scale weighting, to cover lesion size
+  variation.
 * **AIW (Adaptive Interaction Weighting)**, a per-level softmax gate that
   decides how much of each TIM-enhanced representation to adopt.
 
 Reported results, baselines and ablations live in the paper. They are
 deliberately **not** duplicated here: a second copy of a results table drifts
-out of step with the manuscript. Use `evaluate.py` (below) to regenerate every
-number from a checkpoint.
+out of step with the manuscript. `evaluate.py` (below) regenerates the proposed
+model's metrics from a checkpoint; the paper's Dice column equals
+`max_mean_dice_implied_by_mean_iou_percent` in its summary. Baselines and the
+MSCF/TIM ablation variants are not part of this release.
 
 ---
 
 ## Architecture
-
-<div align="center">
-  <img src="arch.png" alt="Architecture overview" width="95%">
-  <br>
-  <em><strong>Figure 1:</strong> Overall architecture. TIM exchanges features
-  bidirectionally at four decoder levels (D1 to D4). AIW weights the enhanced
-  against the pre-interaction representation at each level. MSCF augments
-  encoder features to cover lesion size variation.</em>
-</div>
 
 | Decoder level | Resolution | Channels | Interaction focus |
 |:-------------:|:----------:|:--------:|:------------------|
@@ -116,30 +110,10 @@ Output: Y in R^(B x H x W x C)
 2: F2 <- SepConv_3x3^(r=2)(X)            # 5x5 effective receptive field
 3: F4 <- SepConv_3x3^(r=4)(X)            # 9x9 effective receptive field
 4: a  <- Softmax(MLP_3(ReLU(MLP_(C/8)(GAP(X)))))
-5: Y  <- Conv_1x1(sum_i a_i * F_i) + X
+5: Y  <- Conv_1x1(sum_i a_i * F_i)
 ```
 
-Separable convolutions keep the parameter count down relative to ASPP, and the
-softmax over scales enforces competition rather than summation.
-
----
-
-## Figures
-
-<div align="center">
-  <img src="tim_aiw.png" alt="TIM and AIW behaviour" width="90%">
-  <br>
-  <em><strong>Figure 2:</strong> Left, task-interaction magnitude per decoder
-  level. Right, the distribution of the AIW weights per level. Both are
-  produced from the per-image columns written by <code>evaluate.py</code>, so
-  they cover the whole test set rather than one batch.</em>
-</div>
-
-<div align="center">
-  <img src="mask.png" alt="Qualitative segmentation results" width="95%">
-  <br>
-  <em><strong>Figure 3:</strong> Qualitative segmentation comparison on BUSI.</em>
-</div>
+The softmax over scales makes the three branches compete rather than sum.
 
 ---
 
@@ -148,7 +122,7 @@ softmax over scales enforces competition rather than summation.
 ```
 .
 |-- config.py           # hyperparameters, dataset paths, split ratios
-|-- data_loader.py      # BUSI loading, mask merging, augmentation, splitting
+|-- data_loader.py      # BUSI and BUSI-WHU loading, augmentation, splitting
 |-- modules.py          # TaskInteractionModule, AdaptiveInteractionWeighting,
 |                       # MultiScaleContextFusion, AttentionGate, ResidualBlock,
 |                       # DualPathAttention
@@ -157,6 +131,9 @@ softmax over scales enforces competition rather than summation.
 |-- loss.py             # segmentation + classification objectives
 |-- train.py            # warmup + cosine training loop, composite monitoring
 |-- evaluate.py         # per-image evaluation export (see below)
+|-- batch_check.py      # predictions at several evaluation batch sizes
+|-- audit_duplicates.py # exact and near-duplicate audit against the split
+|-- complexity.py       # parameters and FLOPs
 |-- requirements.txt
 `-- README.md
 ```
@@ -173,25 +150,22 @@ Reference: Al-Dhabyani et al., *Data in Brief* 28:104863, 2020.
 Where an image has several mask files they are merged by pixel-wise maximum.
 Normal cases carry an all-zero mask.
 
-`data_loader.py` in this repository implements the BUSI pipeline only. The
-second dataset reported in the paper was run from a separate loader that is not
-part of this release.
+`data_loader.py` loads BUSI and BUSI-WHU v3 (`--dataset busi_whu` in
+`train.py`, `evaluate.py` and `batch_check.py`); both use
+the same stratified 70/15/15 split and write a partition manifest.
 
 **Preprocessing**
 
-* resize to 224x224, scale to [0, 1];
+* resize to 224x224, scale to [0, 1] (`config.INPUT_SCALE = "unit"`, as in the reported runs; the Keras EfficientNet-B4 then applies its own 1/255 rescaling, and `"raw"` passes [0, 255] instead);
 * augmentation on the training split only: horizontal flip, vertical flip,
   rotation of +/- 15 degrees, three augmented copies per image plus the
   original;
 * split stratified by **class label** (not by patient), `random_state = 42`.
 
-**Split sizes.** Note that `config.py` declares `TRAIN_SPLIT / VAL_SPLIT /
-TEST_SPLIT = 0.70 / 0.15 / 0.15`, but `prepare_datasets()` calls
-`train_test_split` with hardcoded `test_size=0.40` then `test_size=0.625`,
-which yields 60/15/25, that is 468/117/195 images. `config.TRAIN_SPLIT` and
-`config.TEST_SPLIT` are not read. The discrepancy is flagged in a comment at
-the call site. Changing it changes the test set and therefore every reported
-number, so it is left as released.
+**Split sizes.** `prepare_datasets()` reads `TRAIN_SPLIT / VAL_SPLIT /
+TEST_SPLIT = 0.70 / 0.15 / 0.15` from `config.py`: 546/117/117 BUSI images
+before augmentation. Files are read in sorted order and the partition is
+written to `results/split_manifest_<dataset>.csv`.
 
 ---
 
@@ -202,25 +176,25 @@ pip install -r requirements.txt
 python train.py
 ```
 
-| Hyperparameter | Value (from `config.py`) |
+| Hyperparameter | Value (`config.py`; encoder and frozen layers in `model.py`) |
 |:---------------|:-------------------------|
 | Input resolution | 224 x 224 x 3 |
 | Encoder | EfficientNet-B4, ImageNet, first 50 layers frozen |
 | Decoder channels | 384 / 192 / 96 / 48 |
 | Batch size (train / val) | 24 / 24 |
-| Initial LR | 3.0e-4, cosine annealing to 1.5e-6 |
+| Initial LR | 3.0e-4, cosine annealing (floor 0.03 x 3.0e-4) with plateau reduction down to 1.5e-6 |
 | Optimizer | Adam, beta1 = 0.91, beta2 = 0.999, eps = 1e-7 |
 | Gradient clipping | 1.0 global norm |
 | Warmup epochs | 3 |
 | Max epochs | 100, early stopping patience 22, min delta 0.004 |
 | LR reduction | factor 0.55, patience 7, cooldown 2 |
-| Selection metric | `val_combined` = 0.7 x mean IoU + 0.3 x accuracy, maximised |
-| Task weights | segmentation 0.82 -> 0.80, classification 0.18 -> 0.20 |
+| Selection metric | `val_combined` = 0.7 x IoU + 0.3 x accuracy, maximised. Reported runs: `MeanIoU(num_classes=2)` on the sigmoid output, which casts probabilities to class labels; `config.SELECTION_IOU = "binary_iou"` thresholds at 0.5 instead |
+| Task weights | 0.82 / 0.18, set at compile; the callback in `train.py` does not change them in TF 2.13 (see `AdaptiveLossWeights`) |
 
 ### Loss
 
 ```
-L_total = w_seg(t) * L_seg + w_clf(t) * L_clf
+L_total = 0.82 * L_seg + 0.18 * L_clf
 
 L_seg = L_focal_tversky + 0.25 * L_boundary + 0.15 * L_gradient_dispersion
 L_clf = FocalCrossEntropy(gamma = 2.0)
@@ -234,8 +208,8 @@ Three facts about `loss.py` that the code settles:
    0.3 / 0.7 weighting is not applied anywhere in this repository.
 2. The boundary term filters the **thresholded** mask
    (`tf.cast(y_pred > 0.5, ...)`), so it carries no gradient with respect to
-   the mask probabilities. It affects the logged loss and checkpoint selection,
-   not boundary training. The curvature kernel uses `sigma = k/4 = 1.25` for
+   the mask probabilities. It changes only the logged loss value (selection
+   monitors `val_combined`), not boundary training. The curvature kernel uses `sigma = k/4 = 1.25` for
    the 5x5 filter.
 3. The texture term applies Sobel to the **masks**, not to the ultrasound
    image, so it penalises horizontal mask-gradient dispersion rather than image
@@ -246,11 +220,22 @@ Each of these is documented at the relevant line in `loss.py`.
 
 ---
 
+## Controls and audits
+
+| Purpose | How |
+|:--|:--|
+| AIW controls | `config.AIW_MODE`: `adaptive` (reported), `off` (TIM output used directly), `fixed` (0.5 / 0.5), `constant` (two learned per-level constants, softmax, summing to 1) |
+| Seeds | `python train.py --dataset busi --seed 1`; the split seed stays `config.RANDOM_STATE`; each run is saved as `checkpoints/best_<dataset>_<aiw_mode>_s<seed>.h5` and appended to `results/run_ledger.csv` (test N, correct count, early-stop flag, checkpoint hash) |
+| BUSI-WHU | `python train.py --dataset busi_whu` after setting `WHU_IMAGE_GLOB` and `WHU_MASK_PATTERN` in `config.py` to the archive layout |
+| Duplicate audit | `python audit_duplicates.py --root data/BUSI --manifest results/split_manifest_busi.csv` |
+| Batch dependence | `python batch_check.py --checkpoint checkpoints/best_busi_adaptive_s42.h5 --sizes 1 8 24` |
+| Cost | `python complexity.py` (parameters and FLOPs at 224 x 224) |
+
 ## Evaluation
 
 ```bash
-python evaluate.py --checkpoint checkpoints/best.keras
-python evaluate.py --checkpoint checkpoints/best.keras --batch-size 1
+python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5
+python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5 --batch-size 1
 ```
 
 `evaluate.py` is additive: it trains nothing and modifies nothing. It writes
@@ -260,7 +245,7 @@ three files to `config.RESULTS_DIR`:
 |:-----|:---------|
 | `predictions_<tag>.csv` | one row per test image: true and predicted class, all class probabilities, per-image TP/FP/FN, per-image IoU and Dice, and the four AIW weight pairs for that image |
 | `confusion_<tag>.csv` | confusion matrix, entries sum to N |
-| `summary_<tag>.json` | aggregates, each with its denominator |
+| `summary_<tag>.json` | aggregates, each with its denominator: accuracy, weighted and macro F1, balanced accuracy, macro one-vs-rest AUC, per-class precision/recall/F1, mean and median Dice, mean IoU over positive-mask images, empty-mask false-positive rate |
 
 It is built so the published aggregates can be checked rather than trusted:
 
@@ -273,14 +258,14 @@ It is built so the published aggregates can be checked rather than trusted:
 * images with an empty ground-truth mask are counted separately instead of
   being silently dropped or scored as zero;
 * AIW weights are recomputed as real model outputs through
-  `AdaptiveInteractionWeighting.compute_weights`, so the per-level weight
-  figures cover the whole test set rather than the last batch.
+  `AdaptiveInteractionWeighting.compute_weights`, so the exported per-level
+  weights cover the whole test set rather than the last batch.
 
 ---
 
 ## Citation
 
-Please cite the arXiv version until the camera-ready appears.
+Please cite the arXiv version (arXiv:2603.01295) until the camera-ready appears.
 
 ---
 
@@ -297,4 +282,4 @@ MIT. See `LICENSE`.
 * **Focal loss:** Lin et al., "Focal loss for dense object detection,"
   *ICCV*, 2017.
 * **Attention U-Net:** Oktay et al., "Attention U-Net: learning where to look
-  for the pancreas," *MIDL*, 2018.
+  for the pancreas," arXiv:1804.03999, 2018.

@@ -69,7 +69,7 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
 
     # NOTE: y_pred is hard-thresholded here, so this term is NOT
     # differentiable with respect to the mask probabilities. It changes the
-    # logged loss value and can affect checkpoint selection, but supplies no
+    # logged loss value only (selection monitors val_combined), and supplies no
     # boundary-training gradient. Treat it as a diagnostic, not a penalty.
     y_true_bin = tf.clip_by_value(tf.cast(y_true > 0.5, tf.float32), 0.0, 1.0)
     y_pred_bin = tf.clip_by_value(tf.cast(y_pred > 0.5, tf.float32), 0.0, 1.0)

@@ -199,14 +199,24 @@ class AdaptiveInteractionWeighting(layers.Layer):
     This is the behaviour the paper describes. Changing it alters inference and
     invalidates every reported result, so do not change it without re-running.
     """
-    def __init__(self, **kwargs):
+    def __init__(self, mode=None, **kwargs):
         super().__init__(**kwargs)
+        import config as _cfg
+        self.mode = mode or getattr(_cfg, "AIW_MODE", "adaptive")
+        if self.mode not in ("adaptive", "off", "fixed", "constant"):
+            raise ValueError(f"unknown AIW mode: {self.mode}")
 
     def build(self, input_shape):
-        self.weight_network = tf.keras.Sequential([
-            layers.Dense(32, activation='relu'),
-            layers.Dense(2,  activation='softmax'),
-        ], name=f'{self.name}_weight_network')
+        # The weight network exists only in "adaptive" mode; unused, unbuilt
+        # sub-layers would make model.trainable_variables raise.
+        if self.mode == "adaptive":
+            self.weight_network = tf.keras.Sequential([
+                layers.Dense(32, activation='relu'),
+                layers.Dense(2,  activation='softmax'),
+            ], name=f'{self.name}_weight_network')
+        if self.mode == "constant":
+            self.const_logits = self.add_weight(
+                name="const_logits", shape=(2,), initializer="zeros", trainable=True)
         super().build(input_shape)
 
     def _activation_dispersion(self, features):
@@ -229,15 +239,25 @@ class AdaptiveInteractionWeighting(layers.Layer):
         """Return the two interaction weights, shape [B, 2], summing to 1.
 
         Split out of call() so that evaluate.py can export the weights as real
-        model outputs for the per-level weight-distribution figure. Pure
+        model outputs for per-image weight export. Pure
         refactor: call() uses this method, so behaviour is unchanged.
         """
+        batch = tf.shape(seg_enhanced)[0]
+        if self.mode == "off":
+            return tf.ones([batch, 2])
+        if self.mode == "fixed":
+            return 0.5 * tf.ones([batch, 2])
+        if self.mode == "constant":
+            # softmax keeps the fixed-sum constraint of the adaptive gate
+            return tf.tile(tf.nn.softmax(self.const_logits)[None, :], [batch, 1])
+
         seg_disp = self._activation_dispersion(seg_enhanced)
         clf_disp = self._activation_dispersion(clf_enhanced)
 
         # BATCH-DEPENDENT, at inference as well as in training: each statistic
         # is divided by its mean over the CURRENT batch. See the class
-        # docstring. At batch size 1 both terms become 1 and the gate reduces
+        # docstring. At batch size 1 both terms become v/(v+1e-8), approximately 1,
+        # and the gate reduces
         # to a learned per-level constant.
         seg_disp_norm = seg_disp / (tf.reduce_mean(seg_disp) + 1e-8)
         clf_disp_norm = clf_disp / (tf.reduce_mean(clf_disp) + 1e-8)
@@ -257,4 +277,6 @@ class AdaptiveInteractionWeighting(layers.Layer):
         return seg_final, clf_final
 
     def get_config(self):
-        return super().get_config()
+        config = super().get_config()
+        config.update({'mode': self.mode})
+        return config

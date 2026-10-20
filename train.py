@@ -27,7 +27,19 @@ class CompositeMetric(Callback):
 
 
 class AdaptiveLossWeights(Callback):
-    """Dynamically adjust loss weights during training"""
+    """Task-weight callback as used in the reported runs.
+
+    Epochs 0-14: segmentation +0.007 per epoch up to 0.92, classification
+    -0.007 down to 0.08; from epoch 15: 0.80 / 0.20. The warm-up fit covers
+    epochs 0-2 and the main fit continues at initial_epoch = WARMUP_EPOCHS, so
+    both share one epoch index.
+
+    The weights are assigned to model.loss_weights after compile(). In
+    TensorFlow 2.13 (requirements.txt) compile() copies the weights into
+    model.compiled_loss (keras/src/engine/compile_utils.LossesContainer), and
+    the later assignment does not reach it, so the effective task weights stay
+    at the compile-time values 0.82 / 0.18 for the whole run.
+    """
     def __init__(self):
         super().__init__()
         self.seg_weight = config.SEG_WEIGHT_START
@@ -125,12 +137,23 @@ class CosineDecayScheduler(Callback):
 # MAIN TRAINING
 # ============================================================================
 def main():
+    import argparse, random, csv, datetime
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", default="busi", choices=["busi", "busi_whu"])
+    ap.add_argument("--seed", type=int, default=config.RANDOM_STATE,
+                    help="training seed; the split seed stays config.RANDOM_STATE")
+    args = ap.parse_args()
+    random.seed(args.seed); np.random.seed(args.seed); tf.random.set_seed(args.seed)
+
     print("=" * 80)
-    print("Multi-Task Breast Ultrasound Training")
+    print(f"Multi-Task Breast Ultrasound Training | {args.dataset} | seed {args.seed} "
+          f"| AIW {config.AIW_MODE} | input {config.INPUT_SCALE} | IoU {config.SELECTION_IOU}")
     print("=" * 80)
     
     # Load data
-    data = prepare_datasets(config.BUSI_PATH)
+    path = config.BUSI_WHU_PATH if args.dataset == "busi_whu" else config.BUSI_PATH
+    num_classes = len(config.WHU_CLASSES) if args.dataset == "busi_whu" else config.NUM_CLF_CLASSES
+    data = prepare_datasets(path, dataset=args.dataset)
     
     # Create TF datasets
     train_dataset = tf.data.Dataset.from_tensor_slices((
@@ -154,7 +177,7 @@ def main():
     model = adaptive_interaction_model(
         input_size=config.INPUT_SIZE,
         num_seg_classes=config.NUM_SEG_CLASSES,
-        num_clf_classes=config.NUM_CLF_CLASSES,
+        num_clf_classes=num_classes,
         dropout_rate=config.DROPOUT_RATE
     )
     
@@ -173,7 +196,10 @@ def main():
         },
         metrics={
             "segmentation_output": [
-                tf.keras.metrics.MeanIoU(num_classes=2, name="mean_io_u"),
+                (tf.keras.metrics.BinaryIoU(target_class_ids=[0, 1], threshold=0.5,
+                                            name="mean_io_u")
+                 if config.SELECTION_IOU == "binary_iou"
+                 else tf.keras.metrics.MeanIoU(num_classes=2, name="mean_io_u")),
                 tf.keras.metrics.BinaryAccuracy(name="bin_acc")
             ],
             "classification_output": [
@@ -238,9 +264,13 @@ def main():
         verbose=1
     )
     
-    # Save model
-    model_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.h5')
+    # Save model. EarlyStopping restores the best-scoring weights only when it
+    # stops the run; a run that reaches config.EPOCHS keeps its final weights.
+    # One file per dataset, AIW mode and seed, so seeds do not overwrite each other.
+    model_path = os.path.join(config.CHECKPOINT_DIR,
+                              f'best_{args.dataset}_{config.AIW_MODE}_s{args.seed}.h5')
     model.save(model_path)
+    stopped_early = early_stop.stopped_epoch > 0
     print(f"\nModel saved to {model_path}")
     
     # Evaluate on test set
@@ -259,6 +289,27 @@ def main():
     print("\nTest Results:")
     for name, value in zip(model.metrics_names, test_results):
         print(f"  {name}: {value:.4f}")
+    test_acc = dict(zip(model.metrics_names, test_results)).get(
+        "classification_output_accuracy", float("nan"))
+    n_correct = int(round(test_acc * len(data['X_test'])))
+    import hashlib
+    with open(model_path, "rb") as fh:
+        ckpt_sha = hashlib.sha256(fh.read()).hexdigest()[:16]
+
+    # Run ledger: one row per run, so every table cell can be traced to a run.
+    ledger = os.path.join(config.RESULTS_DIR, "run_ledger.csv")
+    new = not os.path.exists(ledger)
+    with open(ledger, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(["time", "dataset", "training_seed", "split_seed", "aiw_mode",
+                        "input_scale", "selection_iou", "n_test", "n_correct",
+                        "stopped_early", "checkpoint", "checkpoint_sha256_16"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), args.dataset,
+                    args.seed, config.RANDOM_STATE, config.AIW_MODE, config.INPUT_SCALE,
+                    config.SELECTION_IOU, len(data['X_test']), n_correct,
+                    int(stopped_early), model_path, ckpt_sha])
+    print(f"Run recorded in {ledger}; run evaluate.py on {model_path} for per-image metrics.")
 
 
 if __name__ == "__main__":

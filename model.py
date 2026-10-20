@@ -53,10 +53,10 @@ def adaptive_interaction_model(
     for layer in base.layers[:50]:
         layer.trainable = False
 
-    s1     = base.get_layer('block2a_expand_activation').output   # 56×56
-    s2     = base.get_layer('block3a_expand_activation').output   # 28×28
-    s3     = base.get_layer('block4a_expand_activation').output   # 14×14
-    s4     = base.get_layer('block6a_expand_activation').output   #  7×7
+    s1     = base.get_layer('block2a_expand_activation').output   # 112×112
+    s2     = base.get_layer('block3a_expand_activation').output   # 56×56
+    s3     = base.get_layer('block4a_expand_activation').output   # 28×28
+    s4     = base.get_layer('block6a_expand_activation').output   # 14×14
     bridge = base.get_layer('top_activation').output              #  7×7
 
     s1_e = ResidualBlock(144,  use_attention=True, name='res_s1')(s1)
