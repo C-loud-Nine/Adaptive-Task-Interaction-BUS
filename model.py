@@ -2,6 +2,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB4
 
+import config
 from modules import (
     ResidualBlock,
     AttentionGate,
@@ -15,15 +16,22 @@ def build_decoder_block(prev, skip, channels, dropout_rate, block_name):
     x    = layers.Conv2DTranspose(channels, 3, strides=2, padding='same')(prev)
     att  = AttentionGate(channels // 2, name=f'att_gate_{block_name}')(skip, x)
     x    = layers.Concatenate()([x, att])
-    x    = ResidualBlock(channels, use_attention=False, name=f'res_{block_name}')(x)
+    x    = ResidualBlock(channels, use_attention=False, use_mscf=config.USE_MSCF,
+                         name=f'res_{block_name}')(x)
     x    = layers.Dropout(dropout_rate)(x)
     return x
 
 
 def build_tim_aiw(decoder_out, encoder_feat, seg_channels, level_name, dropout_rate):
-    """Attach TIM + AIW to a decoder level. Returns (seg_final, clf_final)."""
+    """Attach TIM + AIW to a decoder level. Returns (seg_final, clf_final).
+
+    With config.USE_TIM = False the decoder features and the classification
+    vector are passed on unchanged (ablation rows without TIM).
+    """
     clf_raw = layers.GlobalAveragePooling2D()(encoder_feat)
     clf_raw = layers.Dense(256, activation='relu', name=f'clf_{level_name}_features')(clf_raw)
+    if not config.USE_TIM:
+        return decoder_out, clf_raw
 
     tim = TaskInteractionModule(seg_channels=seg_channels, clf_channels=256,
                                 name=f'task_interaction_{level_name}')
@@ -59,11 +67,11 @@ def adaptive_interaction_model(
     s4     = base.get_layer('block6a_expand_activation').output   # 14×14
     bridge = base.get_layer('top_activation').output              #  7×7
 
-    s1_e = ResidualBlock(144,  use_attention=True, name='res_s1')(s1)
-    s2_e = ResidualBlock(192,  use_attention=True, name='res_s2')(s2)
-    s3_e = ResidualBlock(336,  use_attention=True, name='res_s3')(s3)
-    s4_e = ResidualBlock(960,  use_attention=True, name='res_s4')(s4)
-    br_e = ResidualBlock(1792, use_attention=True, name='res_bridge')(bridge)
+    s1_e = ResidualBlock(144,  use_attention=True, use_mscf=config.USE_MSCF, name='res_s1')(s1)
+    s2_e = ResidualBlock(192,  use_attention=True, use_mscf=config.USE_MSCF, name='res_s2')(s2)
+    s3_e = ResidualBlock(336,  use_attention=True, use_mscf=config.USE_MSCF, name='res_s3')(s3)
+    s4_e = ResidualBlock(960,  use_attention=True, use_mscf=config.USE_MSCF, name='res_s4')(s4)
+    br_e = ResidualBlock(1792, use_attention=True, use_mscf=config.USE_MSCF, name='res_bridge')(bridge)
 
     # ------------------------------------------------------------------
     # DECODER  (4 levels, each followed by TIM + AIW)

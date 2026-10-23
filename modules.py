@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers
 
@@ -82,18 +83,24 @@ class DualPathAttention(layers.Layer):
 
 
 class ResidualBlock(layers.Layer):
-    """Residual block with multi-scale fusion and optional dual-path attention."""
-    def __init__(self, channels, use_attention=True, **kwargs):
+    """Residual block with multi-scale fusion (MSCF) and optional dual-path attention.
+
+    use_mscf=False gives the plain residual block used by the ablation rows
+    without MSCF.
+    """
+    def __init__(self, channels, use_attention=True, use_mscf=True, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.use_attention = use_attention
+        self.use_mscf = use_mscf
 
     def build(self, input_shape):
         self.conv1 = layers.SeparableConv2D(self.channels, 3, padding='same', activation='relu', name=f'{self.name}_conv1')
         self.bn1   = layers.BatchNormalization(name=f'{self.name}_bn1')
         self.conv2 = layers.SeparableConv2D(self.channels, 3, padding='same', name=f'{self.name}_conv2')
         self.bn2   = layers.BatchNormalization(name=f'{self.name}_bn2')
-        self.multiscale   = MultiScaleContextFusion(self.channels, name=f'{self.name}_multiscale')
+        if self.use_mscf:
+            self.multiscale = MultiScaleContextFusion(self.channels, name=f'{self.name}_multiscale')
         if self.use_attention:
             self.attention = DualPathAttention(self.channels, name=f'{self.name}_attention')
         self.residual_proj = layers.Conv2D(self.channels, 1, padding='same', name=f'{self.name}_proj')
@@ -103,7 +110,8 @@ class ResidualBlock(layers.Layer):
         residual = inputs
         x = self.bn1(self.conv1(inputs))
         x = self.bn2(self.conv2(x))
-        x = self.multiscale(x)
+        if self.use_mscf:
+            x = self.multiscale(x)
         if self.use_attention:
             x = self.attention(x, task_context)
         if residual.shape[-1] != self.channels:
@@ -112,7 +120,8 @@ class ResidualBlock(layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({'channels': self.channels, 'use_attention': self.use_attention})
+        config.update({'channels': self.channels, 'use_attention': self.use_attention,
+                       'use_mscf': self.use_mscf})
         return config
 
 
@@ -200,15 +209,24 @@ class AdaptiveInteractionWeighting(layers.Layer):
 
     Blends pre-interaction and TIM-enhanced features with two coefficients
     produced by a softmax, so w_seg + w_clf = 1 at every decoder level
-    (Eqs. (4)-(8) of the paper). Each activation-dispersion descriptor is
-    divided by its mean over the batch, identically in training and inference.
+    (Eqs. (4)-(8) of the paper).
+
+    Each activation-dispersion descriptor is divided by a mean m_t. During
+    training m_t is the mean over the current batch (a bias-corrected moving
+    average of it is also kept, and used for validation). After training,
+    calibrate_aiw() fixes m_t to the mean of the descriptor over the training
+    set computed in inference mode, and inference uses that fixed value.
+    Test predictions are therefore independent of batch size, order and
+    composition.
     """
-    def __init__(self, mode=None, **kwargs):
+    def __init__(self, mode=None, momentum=None, **kwargs):
         super().__init__(**kwargs)
         import config as _cfg
         self.mode = mode or getattr(_cfg, "AIW_MODE", "adaptive")
         if self.mode not in ("adaptive", "off", "fixed", "constant"):
             raise ValueError(f"unknown AIW mode: {self.mode}")
+        self.momentum = float(momentum if momentum is not None
+                              else getattr(_cfg, "AIW_MOMENTUM", 0.99))
 
     def build(self, input_shape):
         # The weight network exists only in "adaptive" mode; unused, unbuilt
@@ -218,6 +236,13 @@ class AdaptiveInteractionWeighting(layers.Layer):
                 layers.Dense(32, activation='relu'),
                 layers.Dense(2,  activation='softmax'),
             ], name=f'{self.name}_weight_network')
+            # Running statistics of the two batch means (not trained by SGD).
+            self.moving_seg = self.add_weight(name="moving_seg", shape=(),
+                                              initializer="zeros", trainable=False)
+            self.moving_clf = self.add_weight(name="moving_clf", shape=(),
+                                              initializer="zeros", trainable=False)
+            self.num_updates = self.add_weight(name="num_updates", shape=(),
+                                               initializer="zeros", trainable=False)
         if self.mode == "constant":
             self.const_logits = self.add_weight(
                 name="const_logits", shape=(2,), initializer="zeros", trainable=True)
@@ -235,7 +260,33 @@ class AdaptiveInteractionWeighting(layers.Layer):
             variance = tf.reduce_mean(tf.square(features - mean), axis=1, keepdims=True)
             return variance
 
-    def compute_weights(self, seg_enhanced, clf_enhanced):
+    def set_population_stats(self, seg_mean, clf_mean):
+        """Fix the inference means (used by calibrate_aiw after training)."""
+        self.moving_seg.assign(float(seg_mean))
+        self.moving_clf.assign(float(clf_mean))
+        self.num_updates.assign(1e6)    # bias correction becomes exactly 1
+
+    def _batch_stats(self, seg_disp, clf_disp):
+        """Training: normalise by the batch means and update the moving averages."""
+        seg_mean = tf.reduce_mean(seg_disp)
+        clf_mean = tf.reduce_mean(clf_disp)
+        m = self.momentum
+        self.moving_seg.assign(m * self.moving_seg + (1.0 - m) * tf.stop_gradient(seg_mean))
+        self.moving_clf.assign(m * self.moving_clf + (1.0 - m) * tf.stop_gradient(clf_mean))
+        self.num_updates.assign_add(1.0)
+        return seg_mean, clf_mean
+
+    def _population_stats(self, seg_disp, clf_disp):
+        """Inference: bias-corrected moving averages (batch means only if the
+        layer has never been trained)."""
+        correction = 1.0 - tf.pow(self.momentum, self.num_updates)
+        trained = self.num_updates > 0.0
+        safe = tf.maximum(correction, 1e-12)
+        seg_mean = tf.where(trained, self.moving_seg / safe, tf.reduce_mean(seg_disp))
+        clf_mean = tf.where(trained, self.moving_clf / safe, tf.reduce_mean(clf_disp))
+        return seg_mean, clf_mean
+
+    def compute_weights(self, seg_enhanced, clf_enhanced, training=False):
         """Return the two interaction weights, shape [B, 2], summing to 1.
 
         Also used by evaluate.py to export the per-image weights.
@@ -252,15 +303,29 @@ class AdaptiveInteractionWeighting(layers.Layer):
         seg_disp = self._activation_dispersion(seg_enhanced)
         clf_disp = self._activation_dispersion(clf_enhanced)
 
-        # Normalise each descriptor by its batch mean (Eq. 5)
-        seg_disp_norm = seg_disp / (tf.reduce_mean(seg_disp) + 1e-8)
-        clf_disp_norm = clf_disp / (tf.reduce_mean(clf_disp) + 1e-8)
+        # Normalise each descriptor (Eq. 5): batch mean in training, the
+        # stored mean at inference (fixed by calibrate_aiw after training).
+        if training is None:
+            training = tf.keras.backend.learning_phase()
+        if isinstance(training, (bool, int)):
+            if training:
+                seg_mean, clf_mean = self._batch_stats(seg_disp, clf_disp)
+            else:
+                seg_mean, clf_mean = self._population_stats(seg_disp, clf_disp)
+        else:
+            seg_mean, clf_mean = tf.cond(
+                tf.cast(training, tf.bool),
+                lambda: self._batch_stats(seg_disp, clf_disp),
+                lambda: self._population_stats(seg_disp, clf_disp))
+
+        seg_disp_norm = seg_disp / (seg_mean + 1e-8)
+        clf_disp_norm = clf_disp / (clf_mean + 1e-8)
 
         dispersions = tf.concat([seg_disp_norm, clf_disp_norm], axis=-1)
         return self.weight_network(dispersions)               # softmax: sums to 1
 
     def call(self, seg_base, seg_enhanced, clf_base, clf_enhanced, training=None):
-        adaptive_weights = self.compute_weights(seg_enhanced, clf_enhanced)
+        adaptive_weights = self.compute_weights(seg_enhanced, clf_enhanced, training=training)
 
         seg_weight = tf.reshape(adaptive_weights[:, 0:1], [-1, 1, 1, 1])
         clf_weight = tf.reshape(adaptive_weights[:, 1:2], [-1, 1])
@@ -272,5 +337,47 @@ class AdaptiveInteractionWeighting(layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({'mode': self.mode})
+        config.update({'mode': self.mode, 'momentum': self.momentum})
         return config
+
+def aiw_call_args(layer):
+    """Return the four tensors an AIW layer was called with, in call order.
+
+    Keras stores a multi-input call as node.call_args (positional) and
+    node.call_kwargs (keyword); after loading a saved model the trailing
+    arguments may appear as keywords.
+    """
+    node = layer._inbound_nodes[0]
+    args = list(node.call_args)
+    kwargs = node.call_kwargs or {}
+    for key in ("seg_base", "seg_enhanced", "clf_base", "clf_enhanced"):
+        if key in kwargs:
+            args.append(kwargs[key])
+    return args
+
+
+def calibrate_aiw(model, images, batch_size=24):
+    """Fix each adaptive AIW layer's inference means to the mean descriptor
+    over `images` (the training set), computed in inference mode.
+
+    Returns {layer name: (seg_mean, clf_mean)}; empty if the model has no
+    adaptive AIW layer.
+    """
+    aiw_layers = [l for l in model.layers
+                  if isinstance(l, AdaptiveInteractionWeighting) and l.mode == "adaptive"]
+    if not aiw_layers:
+        return {}
+    outputs = []
+    for layer in aiw_layers:
+        ins = aiw_call_args(layer)
+        outputs += [layer._activation_dispersion(ins[1]),
+                    layer._activation_dispersion(ins[3])]
+    probe = tf.keras.Model(model.inputs, outputs)
+    values = probe.predict(images, batch_size=batch_size, verbose=0)
+    stats = {}
+    for k, layer in enumerate(aiw_layers):
+        seg_mean = float(np.mean(values[2 * k]))
+        clf_mean = float(np.mean(values[2 * k + 1]))
+        layer.set_population_stats(seg_mean, clf_mean)
+        stats[layer.name] = (seg_mean, clf_mean)
+    return stats

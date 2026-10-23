@@ -82,7 +82,10 @@ D_l^enh = D_l * (1 + 0.7 * g_l * p_l)
 ```
 v_seg  = mean_c Var_hw(D_l^enh)          # activation dispersion
 v_clf  = Var(f_l^enh)
-v~_t   = v_t / (mean_batch(v_t) + 1e-8)   # t in {seg, clf}
+v~_t   = v_t / (m_t + 1e-8)               # t in {seg, clf}
+# m_t: batch mean of v_t during training; after training, m_t is fixed to
+#      the mean of v_t over the training set computed in inference mode
+#      (train.py does this), so test predictions do not depend on the batch
 [w_seg, w_clf] = softmax(W_2 ReLU(W_1 [v~_seg, v~_clf]))
 D_l^fin = D_l + w_seg * (D_l^enh - D_l)
 f_l^fin = f_l + w_clf * (f_l^enh - f_l)
@@ -172,9 +175,22 @@ L_FT,i is the per-image focal Tversky loss (exponent 0.75, alpha = beta = 0.5),
 rho_i the foreground fraction of image i, and L_edge an edge-statistics term on
 the target and predicted masks. L_clf is focal cross-entropy (gamma = 2).
 
-Each run is saved as `checkpoints/best_<dataset>_<aiw_mode>_s<seed>.keras` and
-logged in `results/run_ledger.csv`. `config.AIW_MODE` selects the AIW variant
-(`adaptive` for the paper's model; `off` passes the TIM output on directly).
+Each run is saved as `checkpoints/best_<dataset>_<variant>_s<seed>.keras`
+(`full` for the paper's model) and logged in `results/run_ledger.csv`.
+
+**Ablation (Table 2)**
+
+```bash
+python train.py --dataset busi --mscf off --tim off              # row 1
+python train.py --dataset busi --mscf on  --tim off              # row 2
+python train.py --dataset busi --mscf off --tim on --aiw-mode off   # row 3
+python train.py --dataset busi --mscf off --tim on               # row 4
+python train.py --dataset busi                                   # row 5 (full)
+```
+
+Without MSCF the residual blocks keep their two separable convolutions and
+skip the MSCF layer; without TIM the decoder features and classification
+vectors pass on unchanged; `--aiw-mode off` uses the TIM outputs directly.
 
 ---
 

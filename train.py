@@ -9,6 +9,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, Callbac
 
 import config
 from model import adaptive_interaction_model
+from modules import calibrate_aiw
 from loss import enhanced_lesion_focus_loss, enhanced_multi_modal_focal_loss
 from data_loader import prepare_datasets
 
@@ -106,14 +107,24 @@ def main():
     import argparse, random, csv, datetime
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="busi", choices=["busi", "busi_whu"])
+    ap.add_argument("--aiw-mode", default=config.AIW_MODE,
+                    choices=["adaptive", "off", "fixed", "constant"])
+    ap.add_argument("--mscf", default="on", choices=["on", "off"])
+    ap.add_argument("--tim", default="on", choices=["on", "off"])
     ap.add_argument("--seed", type=int, default=config.RANDOM_STATE,
                     help="training seed; the split seed stays config.RANDOM_STATE")
     args = ap.parse_args()
+    config.AIW_MODE = args.aiw_mode
+    config.USE_MSCF = args.mscf == "on"
+    config.USE_TIM = args.tim == "on"
+    variant = (f"mscf-{args.mscf}_tim-{args.tim}_aiw-{args.aiw_mode}"
+               if (args.mscf, args.tim) != ("on", "on") or args.aiw_mode != "adaptive"
+               else "full")
     random.seed(args.seed); np.random.seed(args.seed); tf.random.set_seed(args.seed)
 
     print("=" * 80)
     print(f"Multi-Task Breast Ultrasound Training | {args.dataset} | seed {args.seed} "
-          f"| AIW {config.AIW_MODE} | input {config.INPUT_SCALE} | IoU {config.SELECTION_IOU}")
+          f"| variant {variant} | input {config.INPUT_SCALE} | IoU {config.SELECTION_IOU}")
     print("=" * 80)
     
     # Load data
@@ -228,9 +239,15 @@ def main():
         verbose=1
     )
     
+    # Fix AIW's inference means: mean descriptor over the training set,
+    # computed in inference mode with the final (restored) weights.
+    aiw_stats = calibrate_aiw(model, data['X_train'], batch_size=config.VAL_BATCH_SIZE)
+    for name, (ms, mc) in aiw_stats.items():
+        print(f"AIW calibration {name}: m_seg = {ms:.6g}, m_clf = {mc:.6g}")
+
     # Save model: one file per dataset, AIW mode and seed.
     model_path = os.path.join(config.CHECKPOINT_DIR,
-                              f'best_{args.dataset}_{config.AIW_MODE}_s{args.seed}.keras')
+                              f'best_{args.dataset}_{variant}_s{args.seed}.keras')
     model.save(model_path)
     stopped_early = early_stop.stopped_epoch > 0
     print(f"\nModel saved to {model_path}")
@@ -264,11 +281,11 @@ def main():
     with open(ledger, "a", newline="") as fh:
         w = csv.writer(fh)
         if new:
-            w.writerow(["time", "dataset", "training_seed", "split_seed", "aiw_mode",
+            w.writerow(["time", "dataset", "training_seed", "split_seed", "variant",
                         "input_scale", "selection_iou", "n_test", "n_correct",
                         "stopped_early", "checkpoint", "checkpoint_sha256_16"])
         w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), args.dataset,
-                    args.seed, config.RANDOM_STATE, config.AIW_MODE, config.INPUT_SCALE,
+                    args.seed, config.RANDOM_STATE, variant, config.INPUT_SCALE,
                     config.SELECTION_IOU, len(data['X_test']), n_correct,
                     int(stopped_early), model_path, ckpt_sha])
     print(f"Run recorded in {ledger}; run evaluate.py on {model_path} for per-image metrics.")

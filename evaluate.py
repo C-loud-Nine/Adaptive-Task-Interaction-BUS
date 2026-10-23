@@ -61,21 +61,7 @@ def per_image_overlap(y_true, y_pred_prob, threshold=THRESHOLD):
     return tp, fp, fn, iou, dice, has_fg
 
 
-def _aiw_call_args(layer):
-    """Return the four tensors an AIW layer was called with, in call order.
-
-    Keras stores a multi-input call as node.call_args (positional) and
-    node.call_kwargs (keyword); after loading a saved model the trailing
-    arguments may appear as keywords. layer.input only returns the first
-    positional argument, so it cannot be used here.
-    """
-    node = layer._inbound_nodes[0]
-    args = list(node.call_args)
-    kwargs = node.call_kwargs or {}
-    for key in ("seg_base", "seg_enhanced", "clf_base", "clf_enhanced"):
-        if key in kwargs:
-            args.append(kwargs[key])
-    return args
+_aiw_call_args = modules.aiw_call_args
 
 
 def build_weight_export_model(model):
@@ -107,6 +93,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--save-masks", action="store_true",
+                    help="also write the predicted test masks (threshold 0.5) as PNGs")
     ap.add_argument("--dataset", default="busi", choices=["busi", "busi_whu"])
     ap.add_argument("--batch-size", type=int, default=config.VAL_BATCH_SIZE,
                     help="evaluation batch size (default: config.VAL_BATCH_SIZE)")
@@ -144,6 +132,16 @@ def main():
         assert len(w) == n, f"aiw_{lvl} has {len(w)} rows, expected {n}"
 
     clf_pred = clf_prob.argmax(axis=1)
+
+    if args.save_masks:
+        import cv2
+        mdir = os.path.join(config.RESULTS_DIR, f"masks_{tag}")
+        os.makedirs(mdir, exist_ok=True)
+        for i in range(n):
+            name = str(files[i]).replace("/", "__").replace("\\", "__")
+            name = os.path.splitext(name)[0] + ".png"
+            cv2.imwrite(os.path.join(mdir, name), ((seg_prob[i] > THRESHOLD) * 255).astype(np.uint8))
+        print(f"[write] {n} predicted masks to {mdir}")
     tp, fp, fn, iou, dice, has_fg = per_image_overlap(mask_gt, seg_prob)
     correct = (clf_pred == y_test)
     n_correct = int(correct.sum())
