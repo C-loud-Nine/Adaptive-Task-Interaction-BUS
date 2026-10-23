@@ -172,17 +172,17 @@ L_FT,i is the per-image focal Tversky loss (exponent 0.75, alpha = beta = 0.5),
 rho_i the foreground fraction of image i, and L_edge an edge-statistics term on
 the target and predicted masks. L_clf is focal cross-entropy (gamma = 2).
 
-Each run is saved as `checkpoints/best_<dataset>_<aiw_mode>_s<seed>.h5` and
+Each run is saved as `checkpoints/best_<dataset>_<aiw_mode>_s<seed>.keras` and
 logged in `results/run_ledger.csv`. `config.AIW_MODE` selects the AIW variant
-(`adaptive` for the paper's model, `off` for the TIM-only ablation row).
+(`adaptive` for the paper's model; `off` passes the TIM output on directly).
 
 ---
 
 ## Evaluation
 
 ```bash
-python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5
-python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.h5 --dataset busi_whu
+python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.keras
+python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.keras --dataset busi_whu
 python complexity.py      # 57.4 M parameters, 18.5 GFLOPs per 224x224 image
 ```
 

@@ -14,8 +14,8 @@ evaluated in batches of config.VAL_BATCH_SIZE (24) in split order, as in the
 paper.
 
 Usage:
-    python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5
-    python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.h5 --dataset busi_whu
+    python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.keras
+    python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.keras --dataset busi_whu
 """
 
 import argparse

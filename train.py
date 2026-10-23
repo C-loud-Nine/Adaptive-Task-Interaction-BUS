@@ -230,7 +230,7 @@ def main():
     
     # Save model: one file per dataset, AIW mode and seed.
     model_path = os.path.join(config.CHECKPOINT_DIR,
-                              f'best_{args.dataset}_{config.AIW_MODE}_s{args.seed}.h5')
+                              f'best_{args.dataset}_{config.AIW_MODE}_s{args.seed}.keras')
     model.save(model_path)
     stopped_early = early_stop.stopped_epoch > 0
     print(f"\nModel saved to {model_path}")

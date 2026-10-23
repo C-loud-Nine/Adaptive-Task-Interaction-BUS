@@ -33,7 +33,7 @@ DROPOUT_RATE = 0.3
 
 # AIW variant:
 #   "adaptive": softmax over normalised activation dispersion (the paper's model)
-#   "off":      no blend, the TIM output is used directly (ablation row 3)
+#   "off":      no blend, the TIM output is used directly
 #   "fixed":    fixed blend w_seg = w_clf = 0.5
 #   "constant": two learned per-level constants (softmax, summing to 1)
 AIW_MODE = "adaptive"

@@ -3,7 +3,7 @@ complexity.py - parameter counts and FLOPs at 224 x 224 for one image.
 
 Usage:
     python complexity.py                       # builds the model from config
-    python complexity.py --checkpoint path.h5  # or loads a checkpoint
+    python complexity.py --checkpoint path.keras  # or loads a checkpoint
 FLOPs are counted by the TensorFlow profiler on the frozen graph (one
 multiply-add = 2 FLOPs).
 """
