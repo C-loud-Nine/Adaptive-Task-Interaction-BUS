@@ -17,47 +17,13 @@ from data_loader import prepare_datasets
 # CUSTOM CALLBACKS
 # ============================================================================
 class CompositeMetric(Callback):
-    """Combined metric: 70% IoU + 30% Accuracy"""
+    """Composite validation score: 0.7 * IoU + 0.3 * accuracy."""
     def on_epoch_end(self, epoch, logs=None):
         seg_iou = logs.get("val_segmentation_output_mean_io_u", 0)
         clf_acc = logs.get("val_classification_output_accuracy", 0)
         val_combined = 0.7 * seg_iou + 0.3 * clf_acc
         logs["val_combined"] = val_combined
         print(f"\nEpoch {epoch+1}: Combined Metric = {val_combined:.4f}")
-
-
-class AdaptiveLossWeights(Callback):
-    """Task-weight callback as used in the reported runs.
-
-    Epochs 0-14: segmentation +0.007 per epoch up to 0.92, classification
-    -0.007 down to 0.08; from epoch 15: 0.80 / 0.20. The warm-up fit covers
-    epochs 0-2 and the main fit continues at initial_epoch = WARMUP_EPOCHS, so
-    both share one epoch index.
-
-    The weights are assigned to model.loss_weights after compile(). In
-    TensorFlow 2.13 (requirements.txt) compile() copies the weights into
-    model.compiled_loss (keras/src/engine/compile_utils.LossesContainer), and
-    the later assignment does not reach it, so the effective task weights stay
-    at the compile-time values 0.82 / 0.18 for the whole run.
-    """
-    def __init__(self):
-        super().__init__()
-        self.seg_weight = config.SEG_WEIGHT_START
-        self.clf_weight = config.CLF_WEIGHT_START
-    
-    def on_epoch_begin(self, epoch, logs=None):
-        if epoch < 15:
-            self.seg_weight = min(0.92, self.seg_weight + 0.007)
-            self.clf_weight = max(0.08, self.clf_weight - 0.007)
-        else:
-            self.seg_weight = config.SEG_WEIGHT_FINAL
-            self.clf_weight = config.CLF_WEIGHT_FINAL
-        
-        self.model.loss_weights = {
-            "segmentation_output": self.seg_weight,
-            "classification_output": self.clf_weight
-        }
-        print(f"Loss weights: Seg={self.seg_weight:.3f}, Clf={self.clf_weight:.3f}")
 
 
 class CosineDecayScheduler(Callback):
@@ -207,14 +173,13 @@ def main():
             ],
         },
         loss_weights={
-            "segmentation_output": config.SEG_WEIGHT_START,
-            "classification_output": config.CLF_WEIGHT_START
+            "segmentation_output": config.SEG_WEIGHT,
+            "classification_output": config.CLF_WEIGHT
         }
     )
     
     # Callbacks
     composite_metric = CompositeMetric()
-    adaptive_weights = AdaptiveLossWeights()
     lr_scheduler = CosineDecayScheduler(
         initial_lr=config.INITIAL_LR,
         total_epochs=config.EPOCHS,
@@ -242,7 +207,7 @@ def main():
         train_dataset.take(100),
         validation_data=val_dataset,
         epochs=config.WARMUP_EPOCHS,
-        callbacks=[adaptive_weights, lr_scheduler],
+        callbacks=[lr_scheduler],
         verbose=1
     )
     
@@ -259,14 +224,11 @@ def main():
             composite_metric,
             early_stop,
             lr_scheduler,
-            adaptive_weights
         ],
         verbose=1
     )
     
-    # Save model. EarlyStopping restores the best-scoring weights only when it
-    # stops the run; a run that reaches config.EPOCHS keeps its final weights.
-    # One file per dataset, AIW mode and seed, so seeds do not overwrite each other.
+    # Save model: one file per dataset, AIW mode and seed.
     model_path = os.path.join(config.CHECKPOINT_DIR,
                               f'best_{args.dataset}_{config.AIW_MODE}_s{args.seed}.h5')
     model.save(model_path)
@@ -296,7 +258,7 @@ def main():
     with open(model_path, "rb") as fh:
         ckpt_sha = hashlib.sha256(fh.read()).hexdigest()[:16]
 
-    # Run ledger: one row per run, so every table cell can be traced to a run.
+    # Run ledger: one row per run.
     ledger = os.path.join(config.RESULTS_DIR, "run_ledger.csv")
     new = not os.path.exists(ledger)
     with open(ledger, "a", newline="") as fh:

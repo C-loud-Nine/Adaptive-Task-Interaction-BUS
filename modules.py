@@ -3,7 +3,8 @@ from tensorflow.keras import layers
 
 
 class MultiScaleContextFusion(layers.Layer):
-    """Hierarchical Multi-Scale Fusion with dynamic scale weighting."""
+    """Multi-scale context fusion (MSCF): dilated separable convolutions
+    (rates 1, 2, 4) fused by a per-image softmax over scales."""
     def __init__(self, channels, reduction_ratio=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
@@ -37,7 +38,11 @@ class MultiScaleContextFusion(layers.Layer):
 
 
 class DualPathAttention(layers.Layer):
-    """Dual-Path Attention: Channel + Spatial + Cross-Task gating."""
+    """CBAM-style channel and spatial attention used in the encoder blocks.
+
+    An optional task-context gate is applied when task_context is given; the
+    paper's model calls this layer without it.
+    """
     def __init__(self, channels, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
@@ -142,7 +147,13 @@ class AttentionGate(layers.Layer):
 
 
 class TaskInteractionModule(layers.Layer):
-    """Bidirectional cross-task interaction: Seg↔Clf with multiplicative modulation."""
+    """Task Interaction Module (TIM), Eqs. (1)-(3) of the paper.
+
+    Segmentation -> classification: gated residual update of the
+    classification vector by a pooled decoder summary.
+    Classification -> segmentation: channel modulation
+    mu = 1 + 0.7 * g * p of the decoder features.
+    """
     def __init__(self, seg_channels=192, clf_channels=256, **kwargs):
         super().__init__(**kwargs)
         self.seg_channels = seg_channels
@@ -188,16 +199,9 @@ class AdaptiveInteractionWeighting(layers.Layer):
     """Adaptive Interaction Weighting (AIW).
 
     Blends pre-interaction and TIM-enhanced features with two coefficients
-    produced by a softmax, so w_seg + w_clf = 1 at every decoder level.
-
-    BATCH DEPENDENCE -- IMPORTANT. Each activation-dispersion statistic is
-    divided by its mean over the CURRENT BATCH, at inference as well as during
-    training (see the two `/ (tf.reduce_mean(...) + 1e-8)` lines in call()).
-    The coefficients for one image therefore depend on the other images
-    evaluated alongside it, and at batch size 1 both normalised inputs collapse
-    to approximately 1, so the gate reduces to a learned per-level constant.
-    This is the behaviour the paper describes. Changing it alters inference and
-    invalidates every reported result, so do not change it without re-running.
+    produced by a softmax, so w_seg + w_clf = 1 at every decoder level
+    (Eqs. (4)-(8) of the paper). Each activation-dispersion descriptor is
+    divided by its mean over the batch, identically in training and inference.
     """
     def __init__(self, mode=None, **kwargs):
         super().__init__(**kwargs)
@@ -220,12 +224,8 @@ class AdaptiveInteractionWeighting(layers.Layer):
         super().build(input_shape)
 
     def _activation_dispersion(self, features):
-        """Spatial (or channel) variance of a feature tensor. Returns [B, 1].
-
-        This is a dispersion statistic of the activations, not a predictive-
-        uncertainty estimate: it is computed from one deterministic forward
-        pass with no ensemble, no dropout sampling and no density model.
-        """
+        """Activation dispersion of a feature tensor, shape [B, 1]: spatial
+        variance averaged over channels for maps, variance for vectors."""
         if len(features.shape) == 4:
             mean      = tf.reduce_mean(features, axis=[1, 2], keepdims=True)
             variance  = tf.reduce_mean(tf.square(features - mean), axis=[1, 2])
@@ -238,9 +238,7 @@ class AdaptiveInteractionWeighting(layers.Layer):
     def compute_weights(self, seg_enhanced, clf_enhanced):
         """Return the two interaction weights, shape [B, 2], summing to 1.
 
-        Split out of call() so that evaluate.py can export the weights as real
-        model outputs for per-image weight export. Pure
-        refactor: call() uses this method, so behaviour is unchanged.
+        Also used by evaluate.py to export the per-image weights.
         """
         batch = tf.shape(seg_enhanced)[0]
         if self.mode == "off":
@@ -254,11 +252,7 @@ class AdaptiveInteractionWeighting(layers.Layer):
         seg_disp = self._activation_dispersion(seg_enhanced)
         clf_disp = self._activation_dispersion(clf_enhanced)
 
-        # BATCH-DEPENDENT, at inference as well as in training: each statistic
-        # is divided by its mean over the CURRENT batch. See the class
-        # docstring. At batch size 1 both terms become v/(v+1e-8), approximately 1,
-        # and the gate reduces
-        # to a learned per-level constant.
+        # Normalise each descriptor by its batch mean (Eq. 5)
         seg_disp_norm = seg_disp / (tf.reduce_mean(seg_disp) + 1e-8)
         clf_disp_norm = clf_disp / (tf.reduce_mean(clf_disp) + 1e-8)
 

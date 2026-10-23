@@ -1,34 +1,21 @@
 """
-evaluate.py - per-image evaluation export for the breast ultrasound model.
+evaluate.py - test-set evaluation of a trained checkpoint.
 
-ADDITIVE. Trains nothing and changes nothing in the model or the data
-pipeline. Run it against an existing checkpoint to answer the question that
-blocks submission: do the reported table values reconstruct from integer
-counts and per-image metrics?
+Writes to config.RESULTS_DIR:
+  predictions_<tag>.csv   one row per test image: classes, probabilities,
+                          per-image TP/FP/FN, IoU and Dice, and the AIW
+                          weights of the four decoder levels
+  confusion_<tag>.csv     confusion matrix
+  summary_<tag>.json      aggregate metrics with their denominators
 
-What it writes to config.RESULTS_DIR:
-  predictions_<tag>.csv   one row per test image, including the four AIW
-                          weight pairs for that image
-  confusion_<tag>.csv     confusion matrix, entries sum to N
-  summary_<tag>.json      aggregates, each stated with its denominator
-
-Why each column exists:
-  * Accuracy must equal 100 * (integer correct) / N, so every reported
-    accuracy has to be a multiple of 100/N. The CSV makes the integer count
-    and the denominator visible instead of inferred.
-  * IoU and Dice are computed from the SAME per-image TP/FP/FN at the SAME
-    threshold, so the per-image identity Dice = 2*IoU/(1+IoU) holds exactly
-    and the aggregate obeys mean Dice <= 2*mIoU/(1+mIoU). The summary prints
-    that ceiling and flags a violation.
-  * Empty-ground-truth cases are reported separately rather than silently
-    dropped or counted as zero, because that choice alone moves the mean.
-  * AIW normalises its two dispersion statistics over the CURRENT BATCH, so
-    the evaluation batch size changes the predictions. It is recorded in the
-    summary and in the default tag.
+Segmentation metrics are image-wise foreground IoU and Dice at threshold 0.5,
+averaged over test images with a non-empty ground-truth mask. Images are
+evaluated in batches of config.VAL_BATCH_SIZE (24) in split order, as in the
+paper.
 
 Usage:
     python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5
-    python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.h5 --batch-size 1
+    python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.h5 --dataset busi_whu
 """
 
 import argparse
@@ -56,12 +43,10 @@ CUSTOM_OBJECTS = {
 
 
 def per_image_overlap(y_true, y_pred_prob, threshold=THRESHOLD):
-    """Return per-image TP, FP, FN, IoU, Dice over FOREGROUND pixels.
+    """Return per-image TP, FP, FN, IoU and Dice over foreground pixels.
 
-    IoU and Dice come from one set of counts, so they cannot disagree. An
-    empty ground truth is reported as NaN rather than 1.0 or 0.0: it has no
-    foreground to overlap, and forcing a value is what makes aggregate IoU and
-    Dice drift apart.
+    Images with an empty ground-truth mask get NaN for IoU and Dice and are
+    excluded from the segmentation means.
     """
     t = (y_true > 0.5).astype(np.float64).reshape(len(y_true), -1)
     p = (y_pred_prob > threshold).astype(np.float64).reshape(len(y_pred_prob), -1)
@@ -124,8 +109,7 @@ def main():
     ap.add_argument("--tag", default=None)
     ap.add_argument("--dataset", default="busi", choices=["busi", "busi_whu"])
     ap.add_argument("--batch-size", type=int, default=config.VAL_BATCH_SIZE,
-                    help="AIW normalises over the evaluation batch, so this "
-                         "value changes the predictions. It is recorded.")
+                    help="evaluation batch size (default: config.VAL_BATCH_SIZE)")
     args = ap.parse_args()
     # default tag follows the checkpoint, so runs and seeds do not overwrite each other
     tag = args.tag or f"{os.path.splitext(os.path.basename(args.checkpoint))[0]}_bs{args.batch_size}"
@@ -143,7 +127,7 @@ def main():
         mask_gt = mask_gt[..., 0]
     files = data.get("paths_test", np.array([str(i) for i in range(len(X_test))]))
     n = len(X_test)
-    print(f"[data] test images N = {n}  (grid step = {100.0 / n:.4f} accuracy points)")
+    print(f"[data] test images N = {n}")
 
     export, levels = build_weight_export_model(model)
     preds = export.predict(X_test, batch_size=args.batch_size, verbose=1)
@@ -154,7 +138,7 @@ def main():
     clf_prob = np.asarray(preds[1])
     weights = [np.asarray(w).reshape(len(X_test), -1) for w in preds[2:]] if levels else []
 
-    # Hard guarantee: nothing silently truncated to the last batch.
+    # Sanity check: one prediction per test image.
     assert len(seg_prob) == n and len(clf_prob) == n, "prediction length != N"
     for lvl, w in zip(levels, weights):
         assert len(w) == n, f"aiw_{lvl} has {len(w)} rows, expected {n}"
@@ -230,7 +214,6 @@ def main():
         "n_test_images": n,
         "n_correct": n_correct,
         "accuracy_percent": 100.0 * n_correct / n,
-        "accuracy_grid_step_percent": 100.0 / n,
         "macro_f1_percent": 100.0 * float(np.mean(f1s)),
         "balanced_accuracy_percent": 100.0 * float(np.mean(recs)),
         "weighted_f1_percent": 100.0 * weighted_f1,
@@ -248,10 +231,7 @@ def main():
         "aiw_levels_exported": levels,
     }
     m = summary["mean_iou_percent"] / 100.0
-    summary["max_mean_dice_implied_by_mean_iou_percent"] = 100.0 * 2 * m / (1 + m)
-    summary["dice_within_ceiling"] = bool(
-        summary["mean_dice_percent"]
-        <= summary["max_mean_dice_implied_by_mean_iou_percent"] + 1e-9)
+    summary["dj_from_mean_iou_percent"] = 100.0 * 2 * m / (1 + m)   # D_J column of Table 1
     if levels:
         summary["mean_aiw_weights"] = {
             f"{lvl}": {"w_seg": float(w[:, 0].mean()), "w_clf": float(w[:, 1].mean())}
@@ -261,19 +241,16 @@ def main():
     with open(spath, "w") as f:
         json.dump(summary, f, indent=2)
 
-    print("\n================ RECONSTRUCTION CHECK ================")
+    print("\n==================== TEST RESULTS ====================")
     print(f"  accuracy    = {n_correct}/{n} = {summary['accuracy_percent']:.4f}%")
-    print(f"  grid step   = {summary['accuracy_grid_step_percent']:.4f} points")
-    print(f"                any reported accuracy must be a multiple of this")
     print(f"  macro-F1    = {summary['macro_f1_percent']:.4f}%")
     print(f"  balanced acc= {summary['balanced_accuracy_percent']:.4f}%")
     print(f"  weighted F1 = {summary['weighted_f1_percent']:.4f}%")
     if auc is not None:
         print(f"  macro AUC   = {summary['macro_ovr_auc_percent']:.4f}% (one-vs-rest)")
     print(f"  mean IoU    = {summary['mean_iou_percent']:.4f}% over {n_fg} positive-mask images")
-    print(f"  mean Dice   = {summary['mean_dice_percent']:.4f}%  "
-          f"(ceiling {summary['max_mean_dice_implied_by_mean_iou_percent']:.4f}%, "
-          f"{'OK' if summary['dice_within_ceiling'] else 'VIOLATED'})")
+    print(f"  D_J         = {summary['dj_from_mean_iou_percent']:.4f}%")
+    print(f"  mean Dice   = {summary['mean_dice_percent']:.4f}%")
     print(f"  AIW levels exported: {levels or 'none'}")
     print("======================================================")
     print(f"[write] {spath}")

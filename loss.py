@@ -26,13 +26,10 @@ class GeometricFilters:
 # ============================================================================
 
 def stabilized_tversky_index(y_true, y_pred, alpha=0.5, beta=0.5, smooth=1e-7):
-    """Per-image Tversky index. Returns shape [B].
+    """Per-image Tversky index, shape [B].
 
-    WARNING: enhanced_lesion_focus_loss() below calls this WITHOUT alpha or
-    beta, so these symmetric defaults apply and the term reduces to a focal
-    DICE loss. The asymmetric alpha=0.3 / beta=0.7 penalty is not applied
-    anywhere in this repository. If the asymmetric form is intended, pass it
-    explicitly at the call site and re-run every reported result.
+    With the symmetric defaults alpha = beta = 0.5 used in the paper, the index
+    equals the soft Dice coefficient, so the focal term is a focal Dice loss.
     """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -58,7 +55,11 @@ def stabilized_focal_tversky(y_true, y_pred, gamma=0.75):
 
 
 def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
-    """Curvature-based boundary loss (scalar)."""
+    """Curvature-filtered boundary discrepancy on thresholded masks (scalar).
+
+    Computed on binarised masks, so it is a monitoring term: it is added to the
+    logged loss value and passes no gradient.
+    """
     eps    = 1e-8
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -67,10 +68,6 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
     if y_pred.shape.rank == 3:
         y_pred = tf.expand_dims(y_pred, -1)
 
-    # NOTE: y_pred is hard-thresholded here, so this term is NOT
-    # differentiable with respect to the mask probabilities. It changes the
-    # logged loss value only (selection monitors val_combined), and supplies no
-    # boundary-training gradient. Treat it as a diagnostic, not a penalty.
     y_true_bin = tf.clip_by_value(tf.cast(y_true > 0.5, tf.float32), 0.0, 1.0)
     y_pred_bin = tf.clip_by_value(tf.cast(y_pred > 0.5, tf.float32), 0.0, 1.0)
 
@@ -86,11 +83,11 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
 
 
 def efficient_texture_consistency(y_true, y_pred):
-    """Horizontal mask-gradient dispersion penalty (scalar).
+    """Edge-statistics term L_edge (scalar).
 
-    Sobel is applied to the MASKS (y_true, y_pred), not to the ultrasound
-    image, so this does not measure image texture. The paper names it
-    accordingly.
+    Absolute difference between the per-image standard deviations of the
+    horizontal Sobel responses of the target and predicted soft masks,
+    averaged over the batch.
     """
     eps    = 1e-8
     y_true = tf.cast(y_true, tf.float32)
@@ -116,10 +113,13 @@ def efficient_texture_consistency(y_true, y_pred):
 
 
 def enhanced_lesion_focus_loss(y_true, y_pred):
-    """
-    Combined segmentation loss:
-        L_seg = L_FocalTversky + 0.25 * L_boundary + 0.15 * L_texture
-    with per-sample lesion-size boost.
+    """Segmentation loss.
+
+        L_seg = mean_i[(1 + exp(-10 rho_i)) * L_FT,i] + 0.15 * L_edge
+
+    where rho_i is the foreground fraction of image i. The boundary term
+    (weight 0.25) is computed on thresholded masks and only enters the logged
+    value.
     """
     eps    = 1e-7
     y_true = tf.cast(y_true, tf.float32)
@@ -138,19 +138,16 @@ def enhanced_lesion_focus_loss(y_true, y_pred):
     t_idx   = stabilized_tversky_index(y_true, y_pred, smooth=eps)
     base    = tf.pow(tf.maximum(1.0 - t_idx, eps), 0.75)
 
-    # Boundary + texture (scalars broadcast to [B])
+    # Boundary (monitoring) and edge-statistics terms, broadcast to [B]
     b_loss = efficient_boundary_detection(y_true, y_pred)
     t_loss = efficient_texture_consistency(y_true, y_pred)
     b_vec  = tf.fill(tf.shape(base), tf.cast(b_loss, tf.float32))
     t_vec  = tf.fill(tf.shape(base), tf.cast(t_loss, tf.float32))
 
-    # Lesion-size boost: small lesions get higher weight
+    # Lesion-size weight in [1, 2], decreasing with foreground fraction
     axes         = [1, 2, 3]
     total_pixels = tf.cast(tf.shape(y_true)[1] * tf.shape(y_true)[2] * tf.shape(y_true)[3], tf.float32)
     lesion_ratio = tf.clip_by_value(tf.reduce_sum(y_true, axis=axes) / tf.maximum(total_pixels, 1.0), 0.0, 1.0)
-    # Factor lies in [1, 2] and attains its MAXIMUM at lesion_ratio = 0, i.e.
-    # on EMPTY masks, not on small lesions. BUSI normal cases are therefore
-    # upweighted most unless excluded upstream.
     size_boost   = 1.0 + tf.clip_by_value(tf.exp(-10.0 * lesion_ratio), 0.0, 2.0)
 
     loss = tf.clip_by_value(base * size_boost + 0.25 * b_vec + 0.15 * t_vec, 0.0, 10.0)

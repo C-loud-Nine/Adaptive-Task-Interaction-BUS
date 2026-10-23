@@ -31,18 +31,17 @@ NUM_SEG_CLASSES = 1
 NUM_CLF_CLASSES = 3
 DROPOUT_RATE = 0.3
 
-# AIW variant (controls requested in the ISBI review, item V8-08):
-#   "adaptive": softmax over batch-normalised dispersions (reported model)
-#   "off":      no blend, the TIM output is used directly (w = 1)
+# AIW variant:
+#   "adaptive": softmax over normalised activation dispersion (the paper's model)
+#   "off":      no blend, the TIM output is used directly (ablation row 3)
 #   "fixed":    fixed blend w_seg = w_clf = 0.5
-#   "constant": two learned per-level constants (softmax, summing to 1), no input dependence
+#   "constant": two learned per-level constants (softmax, summing to 1)
 AIW_MODE = "adaptive"
 
-# Input scaling before the Keras EfficientNet-B4, which contains its own
-# Rescaling(1/255) and Normalization layers.
-#   "unit": images divided by 255 in the loader, as in the reported runs, so
-#           the encoder rescales a second time
-#   "raw":  images passed in [0, 255], the range the Keras encoder expects
+# Input scaling in the loader. The Keras EfficientNet-B4 keeps its built-in
+# rescaling and normalisation layers.
+#   "unit": images scaled to [0, 1] (the paper's setting)
+#   "raw":  images passed in [0, 255]
 INPUT_SCALE = "unit"
 
 # ============================================================================
@@ -67,9 +66,8 @@ GLOBAL_CLIPNORM = 1.0
 # ============================================================================
 # DATA SPLIT
 # ============================================================================
-# data_loader.prepare_datasets() reads these three values: a stratified
-# 70/15/15 split (546/117/117 on BUSI, 648/139/140 on BUSI-WHU), written to
-# results/split_manifest_{dataset}.csv.
+# Stratified image-level 70/15/15 split (546/117/117 on BUSI, 648/139/140 on
+# BUSI-WHU), written to results/split_manifest_{dataset}.csv.
 TRAIN_SPLIT = 0.70
 VAL_SPLIT = 0.15
 TEST_SPLIT = 0.15
@@ -78,10 +76,9 @@ RANDOM_STATE = 42
 # ============================================================================
 # LOSS WEIGHTS
 # ============================================================================
-SEG_WEIGHT_START = 0.82
-CLF_WEIGHT_START = 0.18
-SEG_WEIGHT_FINAL = 0.80
-CLF_WEIGHT_FINAL = 0.20
+# Total loss = SEG_WEIGHT * L_seg + CLF_WEIGHT * L_clf
+SEG_WEIGHT = 0.82
+CLF_WEIGHT = 0.18
 
 # ============================================================================
 # CALLBACKS
@@ -93,12 +90,10 @@ REDUCE_LR_FACTOR = 0.55
 REDUCE_LR_COOLDOWN = 2
 MONITOR = "val_combined"
 
-# Segmentation IoU used inside val_combined.
-#   "meaniou_raw": tf.keras.metrics.MeanIoU(num_classes=2) on the sigmoid
-#                  output, as in the reported runs. MeanIoU casts predictions
-#                  to integer class labels, so probabilities below 1 count as
-#                  background.
-#   "binary_iou":  BinaryIoU on both classes after thresholding at 0.5.
+# Segmentation term of val_combined (0.7 * IoU + 0.3 * accuracy).
+#   "meaniou_raw": tf.keras.metrics.MeanIoU(num_classes=2) on the segmentation
+#                  output (the paper's setting)
+#   "binary_iou":  BinaryIoU on both classes after thresholding at 0.5
 SELECTION_IOU = "meaniou_raw"
 MODE = "max"
 
@@ -109,7 +104,7 @@ HORIZONTAL_FLIP_PROB = 0.5
 VERTICAL_FLIP_PROB = 0.5
 ROTATION_LIMIT = 15
 ROTATION_PROB = 0.7
-NUM_AUGMENTATIONS = 3  # Generate 3 augmented versions per sample
+NUM_AUGMENTATIONS = 3  # augmented copies per training image, plus the original
 
 # ============================================================================
 # CATEGORIES

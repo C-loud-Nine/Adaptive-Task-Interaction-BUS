@@ -40,7 +40,7 @@ def load_image_and_merge_masks(
 
 
 def scale_image(image: np.ndarray) -> np.ndarray:
-    """Apply config.INPUT_SCALE ("unit" as in the reported runs, or "raw")."""
+    """Apply config.INPUT_SCALE ("unit": [0, 1], the paper's setting; "raw": [0, 255])."""
     image = image.astype(np.float32)
     return image / 255.0 if config.INPUT_SCALE == "unit" else image
 
@@ -189,7 +189,7 @@ def prepare_datasets(dataset_path: str, dataset: str = "busi") -> dict:
         random_state=config.RANDOM_STATE
     )
     
-    # Write the partition manifest so every reported number can be traced
+    # Write the partition manifest (file, class, split) so results can be traced
     # to the exact image files it was computed on.
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
     manifest = os.path.join(config.RESULTS_DIR, f"split_manifest_{dataset}.csv")

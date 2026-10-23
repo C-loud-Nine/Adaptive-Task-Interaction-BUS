@@ -5,8 +5,7 @@ Usage:
     python complexity.py                       # builds the model from config
     python complexity.py --checkpoint path.h5  # or loads a checkpoint
 FLOPs are counted by the TensorFlow profiler on the frozen graph (one
-multiply-add = 2 FLOPs). Latency is not reported here, because it depends on
-hardware, precision and timing protocol.
+multiply-add = 2 FLOPs).
 """
 import argparse
 import tensorflow as tf
