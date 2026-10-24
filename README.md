@@ -31,13 +31,18 @@ latent features between the two tasks at every decoder level.
 
 ## Results
 
-Proposed model, median of three training seeds on the released partition
+Proposed model, mean of three training seeds on the released partition
 (see the paper for all baselines and the ablation).
 
 | Dataset | IoU (%) | D_J (%) | Accuracy (%) |
 |:--|:--:|:--:|:--:|
-| BUSI | 74.50 | 85.39 | 90.60 |
-| BUSI-WHU | 86.40 | 92.70 | 95.00 |
+| BUSI | 74.47 | 85.37 | 90.60 |
+| BUSI-WHU | 85.97 | 92.46 | 94.52 |
+
+On a BUSI partition that keeps each near-duplicate image group (Pawłowska et al.,
+Data in Brief 48:109247, 2023) within one split, the proposed model reaches
+73.58% IoU and 88.32% accuracy (mean of three seeds); the file lists of this
+partition are in `splits/`.
 
 IoU is the mean image-wise foreground IoU over lesion-positive test images at
 threshold 0.5; D_J = 2J/(1+J) for the mean IoU J; accuracy is computed over all
@@ -83,9 +88,9 @@ D_l^enh = D_l * (1 + 0.7 * g_l * p_l)
 v_seg  = mean_c Var_hw(D_l^enh)          # activation dispersion
 v_clf  = Var(f_l^enh)
 v~_t   = v_t / (m_t + 1e-8)               # t in {seg, clf}
-# m_t: batch mean of v_t during training; after training, m_t is fixed to
-#      the mean of v_t over the training set computed in inference mode
-#      (train.py does this), so test predictions do not depend on the batch
+# m_t: batch mean of v_t during training; after training, train.py fixes m_t
+#      to the mean of v_t over the training set computed in inference mode,
+#      level by level, so test predictions do not depend on the batch
 [w_seg, w_clf] = softmax(W_2 ReLU(W_1 [v~_seg, v~_clf]))
 D_l^fin = D_l + w_seg * (D_l^enh - D_l)
 f_l^fin = f_l + w_clf * (f_l^enh - f_l)
@@ -152,6 +157,9 @@ data/
 
 ## Training
 
+The code also runs on TensorFlow >= 2.16 with `tf-keras` and `TF_USE_LEGACY_KERAS=1`
+(as in the Kaggle notebooks).
+
 ```bash
 pip install -r requirements.txt
 python train.py --dataset busi --seed 42
@@ -167,7 +175,7 @@ python train.py --dataset busi_whu --seed 42
 | Optimiser | Adam (beta1 = 0.91, beta2 = 0.999), global clipnorm 1.0 |
 | Learning rate | 3e-4, cosine decay with plateau reduction (factor 0.55, patience 7) down to 1.5e-6 |
 | Epochs | up to 100, including a 3-epoch warm-up |
-| Early stopping | composite validation score 0.7 x two-class mean IoU + 0.3 x accuracy, patience 22 |
+| Early stopping | composite validation score 0.7 x two-class Keras MeanIoU of the sigmoid outputs + 0.3 x accuracy, patience 22, min delta 0.004 |
 | Loss | 0.82 L_seg + 0.18 L_clf |
 
 **Loss.** L_seg = mean_i[(1 + exp(-10 rho_i)) L_FT,i] + 0.15 L_edge, where
@@ -197,8 +205,8 @@ vectors pass on unchanged; `--aiw-mode off` uses the TIM outputs directly.
 ## Evaluation
 
 ```bash
-python evaluate.py --checkpoint checkpoints/best_busi_adaptive_s42.keras
-python evaluate.py --checkpoint checkpoints/best_busi_whu_adaptive_s42.keras --dataset busi_whu
+python evaluate.py --checkpoint checkpoints/best_busi_full_s42.keras
+python evaluate.py --checkpoint checkpoints/best_busi_whu_full_s42.keras --dataset busi_whu
 python complexity.py      # 57.4 M parameters, 18.5 GFLOPs per 224x224 image
 ```
 

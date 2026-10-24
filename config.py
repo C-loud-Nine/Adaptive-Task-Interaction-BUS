@@ -37,8 +37,6 @@ DROPOUT_RATE = 0.3
 #   "fixed":    fixed blend w_seg = w_clf = 0.5
 #   "constant": two learned per-level constants (softmax, summing to 1)
 AIW_MODE = "adaptive"
-# Momentum of AIW's moving averages (used at inference, as in batch normalisation)
-AIW_MOMENTUM = 0.99
 
 # Ablation switches (Table 2): MSCF in the residual blocks, TIM at the decoder levels
 USE_MSCF = True

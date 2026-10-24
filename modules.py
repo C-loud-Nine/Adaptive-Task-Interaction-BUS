@@ -211,22 +211,21 @@ class AdaptiveInteractionWeighting(layers.Layer):
     produced by a softmax, so w_seg + w_clf = 1 at every decoder level
     (Eqs. (4)-(8) of the paper).
 
-    Each activation-dispersion descriptor is divided by a mean m_t. During
-    training m_t is the mean over the current batch (a bias-corrected moving
-    average of it is also kept, and used for validation). After training,
+    Each activation-dispersion descriptor is divided by a mean m_t (Eq. 5).
+    During training, and for validation during training, m_t is the mean over
+    the current batch, exactly as in the original formulation. After training,
     calibrate_aiw() fixes m_t to the mean of the descriptor over the training
-    set computed in inference mode, and inference uses that fixed value.
-    Test predictions are therefore independent of batch size, order and
-    composition.
+    set computed in inference mode; a calibrated layer then uses that fixed
+    value at inference, so test predictions are independent of batch size,
+    order and composition.
     """
-    def __init__(self, mode=None, momentum=None, **kwargs):
+    def __init__(self, mode=None, **kwargs):
+        kwargs.pop("momentum", None)          # accepted for older configs
         super().__init__(**kwargs)
         import config as _cfg
         self.mode = mode or getattr(_cfg, "AIW_MODE", "adaptive")
         if self.mode not in ("adaptive", "off", "fixed", "constant"):
             raise ValueError(f"unknown AIW mode: {self.mode}")
-        self.momentum = float(momentum if momentum is not None
-                              else getattr(_cfg, "AIW_MOMENTUM", 0.99))
 
     def build(self, input_shape):
         # The weight network exists only in "adaptive" mode; unused, unbuilt
@@ -236,13 +235,13 @@ class AdaptiveInteractionWeighting(layers.Layer):
                 layers.Dense(32, activation='relu'),
                 layers.Dense(2,  activation='softmax'),
             ], name=f'{self.name}_weight_network')
-            # Running statistics of the two batch means (not trained by SGD).
-            self.moving_seg = self.add_weight(name="moving_seg", shape=(),
+            # Fixed inference means, set by calibrate_aiw (not trained by SGD).
+            self.pop_seg = self.add_weight(name="pop_seg", shape=(),
+                                           initializer="zeros", trainable=False)
+            self.pop_clf = self.add_weight(name="pop_clf", shape=(),
+                                           initializer="zeros", trainable=False)
+            self.calibrated = self.add_weight(name="calibrated", shape=(),
                                               initializer="zeros", trainable=False)
-            self.moving_clf = self.add_weight(name="moving_clf", shape=(),
-                                              initializer="zeros", trainable=False)
-            self.num_updates = self.add_weight(name="num_updates", shape=(),
-                                               initializer="zeros", trainable=False)
         if self.mode == "constant":
             self.const_logits = self.add_weight(
                 name="const_logits", shape=(2,), initializer="zeros", trainable=True)
@@ -261,30 +260,10 @@ class AdaptiveInteractionWeighting(layers.Layer):
             return variance
 
     def set_population_stats(self, seg_mean, clf_mean):
-        """Fix the inference means (used by calibrate_aiw after training)."""
-        self.moving_seg.assign(float(seg_mean))
-        self.moving_clf.assign(float(clf_mean))
-        self.num_updates.assign(1e6)    # bias correction becomes exactly 1
-
-    def _batch_stats(self, seg_disp, clf_disp):
-        """Training: normalise by the batch means and update the moving averages."""
-        seg_mean = tf.reduce_mean(seg_disp)
-        clf_mean = tf.reduce_mean(clf_disp)
-        m = self.momentum
-        self.moving_seg.assign(m * self.moving_seg + (1.0 - m) * tf.stop_gradient(seg_mean))
-        self.moving_clf.assign(m * self.moving_clf + (1.0 - m) * tf.stop_gradient(clf_mean))
-        self.num_updates.assign_add(1.0)
-        return seg_mean, clf_mean
-
-    def _population_stats(self, seg_disp, clf_disp):
-        """Inference: bias-corrected moving averages (batch means only if the
-        layer has never been trained)."""
-        correction = 1.0 - tf.pow(self.momentum, self.num_updates)
-        trained = self.num_updates > 0.0
-        safe = tf.maximum(correction, 1e-12)
-        seg_mean = tf.where(trained, self.moving_seg / safe, tf.reduce_mean(seg_disp))
-        clf_mean = tf.where(trained, self.moving_clf / safe, tf.reduce_mean(clf_disp))
-        return seg_mean, clf_mean
+        """Fix the inference means (called by calibrate_aiw after training)."""
+        self.pop_seg.assign(float(seg_mean))
+        self.pop_clf.assign(float(clf_mean))
+        self.calibrated.assign(1.0)
 
     def compute_weights(self, seg_enhanced, clf_enhanced, training=False):
         """Return the two interaction weights, shape [B, 2], summing to 1.
@@ -303,20 +282,17 @@ class AdaptiveInteractionWeighting(layers.Layer):
         seg_disp = self._activation_dispersion(seg_enhanced)
         clf_disp = self._activation_dispersion(clf_enhanced)
 
-        # Normalise each descriptor (Eq. 5): batch mean in training, the
-        # stored mean at inference (fixed by calibrate_aiw after training).
+        # Eq. 5: batch mean while training (and before calibration); the fixed
+        # calibrated mean at inference once calibrate_aiw has been run.
         if training is None:
             training = tf.keras.backend.learning_phase()
         if isinstance(training, (bool, int)):
-            if training:
-                seg_mean, clf_mean = self._batch_stats(seg_disp, clf_disp)
-            else:
-                seg_mean, clf_mean = self._population_stats(seg_disp, clf_disp)
+            use_fixed = tf.logical_and(tf.constant(not bool(training)), self.calibrated > 0.0)
         else:
-            seg_mean, clf_mean = tf.cond(
-                tf.cast(training, tf.bool),
-                lambda: self._batch_stats(seg_disp, clf_disp),
-                lambda: self._population_stats(seg_disp, clf_disp))
+            use_fixed = tf.logical_and(tf.logical_not(tf.cast(training, tf.bool)),
+                                       self.calibrated > 0.0)
+        seg_mean = tf.where(use_fixed, self.pop_seg, tf.reduce_mean(seg_disp))
+        clf_mean = tf.where(use_fixed, self.pop_clf, tf.reduce_mean(clf_disp))
 
         seg_disp_norm = seg_disp / (seg_mean + 1e-8)
         clf_disp_norm = clf_disp / (clf_mean + 1e-8)
@@ -337,7 +313,7 @@ class AdaptiveInteractionWeighting(layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({'mode': self.mode, 'momentum': self.momentum})
+        config.update({'mode': self.mode})
         return config
 
 def aiw_call_args(layer):
@@ -367,17 +343,15 @@ def calibrate_aiw(model, images, batch_size=24):
                   if isinstance(l, AdaptiveInteractionWeighting) and l.mode == "adaptive"]
     if not aiw_layers:
         return {}
-    outputs = []
+    stats = {}
+    # Level by level (model.layers is in topological order, d1 to d4), so each
+    # level is measured with all upstream levels already calibrated.
     for layer in aiw_layers:
         ins = aiw_call_args(layer)
-        outputs += [layer._activation_dispersion(ins[1]),
-                    layer._activation_dispersion(ins[3])]
-    probe = tf.keras.Model(model.inputs, outputs)
-    values = probe.predict(images, batch_size=batch_size, verbose=0)
-    stats = {}
-    for k, layer in enumerate(aiw_layers):
-        seg_mean = float(np.mean(values[2 * k]))
-        clf_mean = float(np.mean(values[2 * k + 1]))
+        probe = tf.keras.Model(model.inputs, [layer._activation_dispersion(ins[1]),
+                                              layer._activation_dispersion(ins[3])])
+        v_seg, v_clf = probe.predict(images, batch_size=batch_size, verbose=0)
+        seg_mean, clf_mean = float(np.mean(v_seg)), float(np.mean(v_clf))
         layer.set_population_stats(seg_mean, clf_mean)
         stats[layer.name] = (seg_mean, clf_mean)
     return stats

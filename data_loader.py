@@ -133,11 +133,16 @@ def augment_dataset(images: np.ndarray, masks: np.ndarray) -> Tuple[np.ndarray, 
     if masks.ndim == 4 and masks.shape[-1] == 1:
         masks = masks[..., 0]
     
+    # albumentations >= 1.4 ignores the global seeds, so the pipeline is seeded
+    # from NumPy, which train.py seeds with the training seed.
+    import inspect
+    seed_kw = ({"seed": int(np.random.randint(0, 2**31 - 1))}
+               if "seed" in inspect.signature(A.Compose.__init__).parameters else {})
     transform = A.Compose([
         A.HorizontalFlip(p=config.HORIZONTAL_FLIP_PROB),
         A.VerticalFlip(p=config.VERTICAL_FLIP_PROB),
         A.Rotate(limit=config.ROTATION_LIMIT, p=config.ROTATION_PROB),
-    ])
+    ], **seed_kw)
     
     augmented_images = [images]
     augmented_masks = [masks]
