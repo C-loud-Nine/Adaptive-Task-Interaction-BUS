@@ -359,7 +359,7 @@ def load_curated(dataset_path: str, dataset: str = "busi", write_log: bool = Tru
         os.makedirs(config.RESULTS_DIR, exist_ok=True)
         import csv
         with open(os.path.join(config.RESULTS_DIR, f"excluded_{dataset}.csv"), "w", newline="") as fh:
-            w = csv.writer(fh)
+            w = csv.writer(fh, lineterminator="\n")
             w.writerow(["file", "class", "reason", "kept_representative"])
             w.writerows(log_rows)
     report.pop("list_member", None)
@@ -434,7 +434,7 @@ def prepare_datasets(dataset_path: str, dataset: str = "busi", augment: bool = T
     import csv, hashlib, shutil
     if report["split_source"].startswith("computed"):
         with open(manifest, "w", newline="") as fh:
-            w = csv.writer(fh)
+            w = csv.writer(fh, lineterminator="\n")
             w.writerow(["file", "class", "split", "group"])
             for i in range(len(images)):
                 w.writerow([paths[i], categories[int(labels[i])], split[i], groups[i]])

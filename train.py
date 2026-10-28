@@ -48,7 +48,7 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--mscf", default="on", choices=["on", "off"])
     ap.add_argument("--tim", default="on", choices=["on", "off"])
-    ap.add_argument("--aiw-mode", default="adaptive", choices=["adaptive", "off", "fixed", "sigmoid"])
+    ap.add_argument("--aiw-mode", default="adaptive", choices=["adaptive", "off", "fixed", "sigmoid", "constant"])
     ap.add_argument("--tim-direction", default="both", choices=["both", "seg2clf", "clf2seg"])
     ap.add_argument("--max-epochs", type=int, default=config.EPOCHS)
     ap.add_argument("--out", default=None, help="run folder (default runs/<dataset>_<variant>_s<seed>)")

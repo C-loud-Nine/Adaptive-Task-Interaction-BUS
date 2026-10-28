@@ -32,7 +32,8 @@ EXPECT = {"busi": (115, 94, 21), "busi_whu": (143, 143, 0), "busi_whu->busi": (6
 ABLATION = {   # Table 2 row -> configuration name written by train.py
     1: "mscf-off_tim-off_aiw-adaptive", 2: "mscf-on_tim-off_aiw-adaptive",
     3: "mscf-off_tim-on_aiw-off", 4: "mscf-off_tim-on_aiw-adaptive", 5: "full",
-    6: "mscf-on_tim-on_aiw-off", 7: "mscf-on_tim-on_aiw-fixed", 8: "mscf-on_tim-on_aiw-sigmoid"}
+    6: "mscf-on_tim-on_aiw-off", 7: "mscf-on_tim-on_aiw-fixed", 8: "mscf-on_tim-on_aiw-sigmoid",
+    9: "mscf-on_tim-on_aiw-constant"}
 COMPARISON = ["unet", "att_unet", "unet_pp", "transunet", "swin_unet", "missformer",
               "mtan", "mtanet", "mti_net", "mtl_oca"]
 SEG_ONLY = {"transunet", "swin_unet", "missformer"}
@@ -40,7 +41,9 @@ FAILS = []
 
 
 def sha(path):
-    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    """sha256 of the file with Windows line endings normalised, so a split file
+    written with CRLF and the same file in the repository compare equal."""
+    return hashlib.sha256(open(path, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def fail(msg):
@@ -142,8 +145,9 @@ def main():
         for ds in ("busi", "busi_whu"):
             for cfg in ("full", ABLATION[1]):
                 need += [(ds, cfg, s) for s in (42, 43, 44)]
-            need += [(ds, c, 42) for c in COMPARISON]
-        need += [("busi", ABLATION[r], s) for r in (2, 3, 4, 6, 7, 8) for s in (42, 43, 44)]
+            need += [(ds, c, 42) for c in COMPARISON if c != "mti_net"]
+            need += [(ds, "mti_net", s) for s in (42, 43, 44)]
+        need += [("busi", ABLATION[r], s) for r in (2, 3, 4, 6, 7, 8, 9) for s in (42, 43, 44)]
         need += [("busi_whu->busi", "full", s) for s in (42, 43, 44)]
         missing = [x for x in need if x not in have]
         for x in missing:

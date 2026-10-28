@@ -128,6 +128,8 @@ class AdaptiveInteractionWeighting(nn.Module):
         self.mode = mode
         if mode in ("adaptive", "sigmoid"):
             self.net = nn.Sequential(nn.Linear(2, 32), nn.ReLU(), nn.Linear(32, 2))
+        if mode == "constant":                                # learned per-level constants (softmax)
+            self.const_logits = nn.Parameter(torch.zeros(2))
         self.register_buffer("pop_seg", torch.zeros(()))
         self.register_buffer("pop_clf", torch.zeros(()))
         self.register_buffer("calibrated", torch.zeros(()))
@@ -139,6 +141,8 @@ class AdaptiveInteractionWeighting(nn.Module):
             return D_enh.new_ones(B, 2, dtype=torch.float32)
         if self.mode == "fixed":
             return D_enh.new_full((B, 2), 0.5, dtype=torch.float32)
+        if self.mode == "constant":
+            return torch.softmax(self.const_logits, 0).expand(B, 2)
         vs, vc = activation_dispersion(D_enh), activation_dispersion(f_enh)
         if self.collect is not None:
             self.collect.append((vs.sum().item(), vc.sum().item(), B))

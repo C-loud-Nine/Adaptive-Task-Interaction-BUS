@@ -108,6 +108,7 @@ python train.py                                      # 5  full model
 python train.py --aiw-mode off                       # 6  full, ω = 1 (no AIW)
 python train.py --aiw-mode fixed                     # 7  full, ω = 0.5
 python train.py --aiw-mode sigmoid                   # 8  full, independent sigmoid gates
+python train.py --aiw-mode constant                  # 9  full, learned constant blend
 ```
 
 ## Comparison methods

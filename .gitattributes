@@ -1,0 +1,2 @@
+# keep the split files byte-identical on every platform (their sha256 identifies the partition)
+*.csv text eol=lf
