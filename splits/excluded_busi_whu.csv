@@ -1,0 +1,3 @@
+file,class,reason,kept_representative
+benign/00203.png,benign,conflicting class labels in duplicate group (near-duplicate check),
+malignant/10043-6.png,malignant,conflicting class labels in duplicate group (near-duplicate check),

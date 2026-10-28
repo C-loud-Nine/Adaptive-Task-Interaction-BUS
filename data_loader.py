@@ -294,6 +294,29 @@ def make_partition(labels: np.ndarray, groups: np.ndarray):
     return split
 
 
+def frozen_partition(paths, labels, categories, manifest_path):
+    """Partition and groups read from a split file (file, class, split, group).
+
+    The curated images must be exactly the files listed, with the same class;
+    otherwise the run stops, so every run uses the paper's partition."""
+    import csv
+    with open(manifest_path, newline="") as fh:
+        rows = {r["file"]: r for r in csv.DictReader(fh)}
+    have = [str(p) for p in paths]
+    missing, extra = sorted(set(rows) - set(have)), sorted(set(have) - set(rows))
+    if missing or extra:
+        raise RuntimeError(f"curated images differ from {manifest_path}: not loaded {missing[:5]} "
+                           f"({len(missing)}), not in the file {extra[:5]} ({len(extra)})")
+    wrong = [p for p, c in zip(have, labels) if rows[p]["class"] != categories[int(c)]]
+    if wrong:
+        raise RuntimeError(f"class differs from {manifest_path} for {wrong[:5]}")
+    split = np.array([rows[p]["split"] for p in have])
+    groups = np.array([int(rows[p]["group"]) for p in have])
+    for g in np.unique(groups):
+        assert len(set(split[groups == g])) == 1, f"group {g} crosses partitions"
+    return split, groups
+
+
 def load_curated(dataset_path: str, dataset: str = "busi", write_log: bool = True):
     """Load a dataset and apply the curation steps described in the README
     (mask-label check, duplicate grouping and removal).
@@ -392,7 +415,13 @@ def prepare_datasets(dataset_path: str, dataset: str = "busi", augment: bool = T
     file paths of each partition and the curation report.
     """
     images, masks, labels, paths, groups, categories, report = load_curated(dataset_path, dataset)
-    split = make_partition(labels, groups)
+    frozen = os.path.join(config.SPLIT_DIR, f"split_manifest_{dataset}.csv")
+    if config.FROZEN_SPLIT and os.path.exists(frozen):
+        split, groups = frozen_partition(paths, labels, categories, frozen)
+        report["split_source"] = os.path.relpath(frozen, os.path.dirname(config.SPLIT_DIR))
+    else:
+        split = make_partition(labels, groups)
+        report["split_source"] = "computed (StratifiedGroupKFold)"
 
     tr, va, te = (np.where(split == s)[0] for s in ("train", "val", "test"))
     X_train, y_train, mask_train, p_train = images[tr], labels[tr], masks[tr], paths[tr]
@@ -402,12 +431,15 @@ def prepare_datasets(dataset_path: str, dataset: str = "busi", augment: bool = T
     # Partition manifest (file, class, split, group) for traceability.
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
     manifest = os.path.join(config.RESULTS_DIR, f"split_manifest_{dataset}.csv")
-    import csv, hashlib
-    with open(manifest, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["file", "class", "split", "group"])
-        for i in range(len(images)):
-            w.writerow([paths[i], categories[int(labels[i])], split[i], groups[i]])
+    import csv, hashlib, shutil
+    if report["split_source"].startswith("computed"):
+        with open(manifest, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["file", "class", "split", "group"])
+            for i in range(len(images)):
+                w.writerow([paths[i], categories[int(labels[i])], split[i], groups[i]])
+    else:
+        shutil.copyfile(frozen, manifest)            # same bytes, so the same sha256 as the file in splits/
     report["manifest_sha256"] = hashlib.sha256(open(manifest, "rb").read()).hexdigest()
     report["split_sizes"] = {s_: int((split == s_).sum()) for s_ in ("train", "val", "test")}
     logger.info(f"Split manifest written to {manifest} (sha256 {report['manifest_sha256']})")

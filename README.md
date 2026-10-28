@@ -21,16 +21,7 @@ skips; 57.3 M parameters, 18.4 GFLOPs per 224 x 224 image.
 
 ## Results
 
-Mean and standard deviation over three seeds, test sets of the splits below.
-
-| Dataset | IoU (%) | Dice (%) | Accuracy (%) | AUC (%) |
-|:--|:--:|:--:|:--:|:--:|
-| BUSI | 72.9 ± 0.4 | 82.5 ± 0.4 | 90.1 ± 0.5 | 92.6 ± 0.3 |
-| BUSI-WHU | 85.4 ± 0.5 | 90.9 ± 0.4 | 91.1 ± 0.4 | 94.9 ± 0.3 |
-
-IoU and Dice: image-wise means over lesion-positive test images at threshold
-0.5. Accuracy and AUC (macro one-vs-rest on BUSI, binary on BUSI-WHU): all test
-images.
+Tables 1 and 2 of the paper, on the fixed partitions in `splits/` (see Data).
 
 ## Installation
 
@@ -43,7 +34,8 @@ pip install -r requirements.txt
 * **BUSI** (Al-Dhabyani et al., *Data in Brief* 28:104863, 2020): 780 images
   (133 normal, 437 benign, 210 malignant), <https://data.mendeley.com/datasets/wmy84gzngw/1>
 * **BUSI-WHU v3** (Huang et al., Mendeley Data, doi:10.17632/k6cpmwybk3.3):
-  927 benign and malignant images.
+  927 benign and malignant images of 816 patients (`img/`, `gt/` and
+  `Patient_infos_BUSI-WHU.xlsx`, which gives the class and the patient of each image).
 
 ```bash
 python prepare_data.py --input /path/to/downloads   # links both datasets into ./data and checks the counts
@@ -57,13 +49,32 @@ python prepare_data.py --input /path/to/downloads   # links both datasets into .
   *Data in Brief* 48:109247, 2023; `splits/busi_duplicate_groups.csv`) and from
   a near-duplicate check on both datasets (64 x 64 thumbnails, correlation
   ≥ 0.98); groups with conflicting class labels are dropped, every other group
-  is kept whole within one partition. BUSI: 761 images (131/427/203); BUSI-WHU: 925;
-* 70/15/15 split stratified by class with `StratifiedGroupKFold` (20 folds,
-  `random_state = 42`), BUSI 533/114/114 and BUSI-WHU 647/139/139; the loader asserts that no group
-  crosses partitions and writes the split (with its SHA-256) and the excluded
-  files to the run folder;
+  is kept whole within one partition. BUSI: 761 images (131/427/203); BUSI-WHU: 925
+  (559/366), where every patient is also kept within one partition (patient-disjoint split);
+* the partition of the paper is fixed in `splits/`: `split_manifest_busi.csv` (train/val/test
+  539/107/115; test 21 normal, 94 lesion images) and `split_manifest_busi_whu.csv`
+  (637/145/143; 815 patients, none in two partitions), each listing file, class, partition and
+  group, plus `excluded_<dataset>.csv` with every excluded image and the reason. Every run reads
+  these files and stops if the curated images differ, so the split does not depend on the
+  scikit-learn version. They were created by `make_partition` (class-stratified 70/15/15 with
+  `StratifiedGroupKFold`, 20 folds, `random_state = 42`); setting `FROZEN_SPLIT = False` in
+  `config.py` recomputes a partition instead. The loader asserts that no group crosses
+  partitions and copies the split file (with its SHA-256) and the exclusions to the run folder;
+* external test (models trained on BUSI-WHU): the 630 curated BUSI lesion images, none of which
+  is a near-copy (thumbnail correlation ≥ 0.98) of a BUSI-WHU image;
 * training images only, after the split: each image is kept plus three augmented copies
   (horizontal flip, rotation up to 15°).
+
+Partition sizes (from the files in `splits/`):
+
+| Dataset | Partition | Images | Per class | Patients |
+|:--|:--|:--:|:--|:--:|
+| BUSI | train | 539 | 100 / 298 / 141 (normal/benign/malignant) | – |
+| BUSI | val | 107 | 10 / 66 / 31 (normal/benign/malignant) | – |
+| BUSI | test | 115 | 21 / 63 / 31 (normal/benign/malignant) | – |
+| BUSI-WHU | train | 637 | 391 / 246 (benign/malignant) | 567 |
+| BUSI-WHU | val | 145 | 84 / 61 (benign/malignant) | 123 |
+| BUSI-WHU | test | 143 | 84 / 59 (benign/malignant) | 125 |
 
 ## Training and testing
 
@@ -71,9 +82,6 @@ python prepare_data.py --input /path/to/downloads   # links both datasets into .
 python train.py --dataset busi --seed 42
 python train.py --dataset busi_whu --seed 42      # also tested on the BUSI lesion images (external test)
 ```
-
-The external test uses the 616 curated BUSI lesion images that remain after
-removing the 14 near-exact copies of BUSI-WHU images.
 
 Each run writes to `runs/<dataset>_<variant>_s<seed>/`: the best checkpoint,
 per-image test predictions (including the AIW coefficients), summaries, the
@@ -85,6 +93,7 @@ from its last finished epoch.
 | Optimiser | Adam (β1 0.91, β2 0.999), batch 24, gradient clipping at 1, mixed precision |
 | Schedule | lr 3e-4, cosine decay with plateau reduction, up to 100 epochs |
 | Encoder | ImageNet weights, frozen through the depthwise convolution of the fourth MBConv block |
+| Input | 224 x 224, pixel values in [0, 255], normalised inside the model with the encoder's ImageNet mean and std |
 | Loss | 0.82 L_seg (size-weighted focal Tversky + BCE + 0.15 edge) + 0.18 focal cross-entropy |
 | Selection | from epoch 4: AIW calibrated on the training images, validation score 0.7 x pooled IoU + 0.3 x accuracy; best epoch restored; early stopping (patience 22, min delta 0.004) |
 
@@ -121,6 +130,18 @@ python baselines/train_baseline.py --model mti_net --dataset busi --seed 42 --ou
 | `mti_net` | HRNet-W18, ImageNet-1k |
 | `mtl_oca` | Res-UNet with GroupNorm, from scratch |
 
+## Checking the runs
+
+```bash
+python analysis/check_runs.py --runs runs
+```
+
+For every run: the partition file has the same SHA-256 as `splits/`, the test set has
+the expected size (BUSI 115 = 94 lesion + 21 normal, BUSI-WHU 143, external 630) and
+files, and accuracy (correct / N), mean IoU and mean Dice agree with the per-image
+results. It then prints, per configuration, the mean and standard deviation over seeds
+as rounded in the tables, accuracy as k / (seeds x N), and lists missing runs.
+
 ## Statistics
 
 ```bash
@@ -145,8 +166,9 @@ model.py                TIM, AIW, MSCF, network, AIW calibration, losses, schedu
 train.py                training, model selection, testing, complexity
 metrics.py              test metrics and result files (all methods)
 baselines/              comparison methods and their training script
+analysis/check_runs.py  checks of every run against the fixed partitions
 analysis/aggregate.py   statistics over runs
-splits/                 published BUSI duplicate groups
+splits/                 published BUSI duplicate groups, the fixed partitions and the exclusions
 ```
 
 ## Citation

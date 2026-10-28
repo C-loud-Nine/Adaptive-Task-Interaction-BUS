@@ -78,6 +78,12 @@ TEST_SPLIT = 0.15
 RANDOM_STATE = 42
 DUPLICATE_LIST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "splits", "busi_duplicate_groups.csv")
+# The partition used in the paper is fixed by the files splits/split_manifest_<dataset>.csv
+# (file, class, split, group; BUSI-WHU groups also join images of the same patient, from
+# Patient_infos_BUSI-WHU.xlsx). Every run reads them, so the split does not depend on the
+# scikit-learn version; the loader stops if the curated images differ from the file.
+FROZEN_SPLIT = True
+SPLIT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "splits")
 
 # ============================================================================
 # LOSS WEIGHTS
