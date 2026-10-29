@@ -416,7 +416,9 @@ def prepare_datasets(dataset_path: str, dataset: str = "busi", augment: bool = T
     """
     images, masks, labels, paths, groups, categories, report = load_curated(dataset_path, dataset)
     frozen = os.path.join(config.SPLIT_DIR, f"split_manifest_{dataset}.csv")
-    if config.FROZEN_SPLIT and os.path.exists(frozen):
+    if config.FROZEN_SPLIT:
+        if not os.path.isfile(frozen):
+            raise FileNotFoundError(f"Required paper split is missing: {frozen}")
         split, groups = frozen_partition(paths, labels, categories, frozen)
         report["split_source"] = os.path.relpath(frozen, os.path.dirname(config.SPLIT_DIR))
     else:
